@@ -77,6 +77,49 @@ pub(crate) fn should_render_switcher(feature_enabled: bool, panel_open: bool) ->
     feature_enabled && panel_open
 }
 
+/// Live, per-group sidebar metadata (Phase 5). Deliberately *not* part
+/// of [`crate::app_state::TabGroupSnapshot`]: every field is recomputed
+/// at runtime from the focused session's cwd / `gh` cache / port
+/// listener, so persisting it to SQLite would only let stale data
+/// flicker on relaunch.
+///
+/// Phase 5.5 will plug in the actual fetchers (lesson learned from the
+/// upstream cmux #2746 incident: cache PR lookups aggressively to avoid
+/// hammering the GitHub API) -- this struct is the contract those
+/// fetchers populate against.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TabGroupRuntimeMetadata {
+    /// Git branch of the focused session's working directory, when the
+    /// directory is a git worktree. `None` for non-repo workspaces.
+    pub git_branch: Option<String>,
+    /// Number of the GitHub pull request linked to `git_branch`.
+    pub pr_number: Option<i32>,
+    /// Ports the workspace's sessions are currently listening on. Empty
+    /// for workspaces without active processes.
+    pub listening_ports: Vec<u16>,
+    /// Number of unseen agent / OSC-99 / OSC-777 notifications -- drives
+    /// the badge ring around the sidebar entry.
+    pub pending_notifications: u32,
+}
+
+impl TabGroupRuntimeMetadata {
+    /// True when the renderer should draw the notification ring for
+    /// this group. Centralizes the rule so Phase 5.5 fetchers and the
+    /// sidebar UI agree on the threshold.
+    pub(crate) fn has_pending_notifications(&self) -> bool {
+        self.pending_notifications > 0
+    }
+
+    /// Convenience accessor used by the sidebar to short-circuit when
+    /// nothing live is worth showing for the group.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.git_branch.is_none()
+            && self.pr_number.is_none()
+            && self.listening_ports.is_empty()
+            && self.pending_notifications == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +159,32 @@ mod tests {
         assert!(!should_render_switcher(false, true));
         assert!(!should_render_switcher(true, false));
         assert!(should_render_switcher(true, true));
+    }
+
+    #[test]
+    fn runtime_metadata_default_is_empty() {
+        let meta = TabGroupRuntimeMetadata::default();
+        assert!(meta.is_empty());
+        assert!(!meta.has_pending_notifications());
+    }
+
+    #[test]
+    fn runtime_metadata_reports_pending_notifications() {
+        let meta = TabGroupRuntimeMetadata {
+            pending_notifications: 3,
+            ..TabGroupRuntimeMetadata::default()
+        };
+        assert!(meta.has_pending_notifications());
+        assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn runtime_metadata_is_not_empty_when_branch_known() {
+        let meta = TabGroupRuntimeMetadata {
+            git_branch: Some("main".into()),
+            ..TabGroupRuntimeMetadata::default()
+        };
+        assert!(!meta.is_empty());
+        assert!(!meta.has_pending_notifications());
     }
 }
