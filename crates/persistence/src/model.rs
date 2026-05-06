@@ -14,9 +14,9 @@ use super::schema::{
     generic_string_objects, ignored_suggestions, mcp_environment_variables,
     mcp_server_installations, mcp_server_panes, notebook_panes, notebooks, object_actions,
     object_metadata, object_permissions, pane_branches, pane_leaves, pane_nodes, panels,
-    project_rules, projects, server_experiments, settings_panes, tabs, team_members, team_settings,
-    teams, terminal_panes, user_profiles, welcome_panes, windows, workflow_panes, workflows,
-    workspace_language_server, workspace_metadata, workspace_teams, workspaces,
+    project_rules, projects, server_experiments, settings_panes, tab_groups, tabs, team_members,
+    team_settings, teams, terminal_panes, user_profiles, welcome_panes, windows, workflow_panes,
+    workflows, workspace_language_server, workspace_metadata, workspace_teams, workspaces,
 };
 
 #[derive(Insertable)]
@@ -343,11 +343,13 @@ pub struct NewWindow {
 
 #[derive(Identifiable, Queryable, Associations)]
 #[diesel(belongs_to(Window))]
+#[diesel(belongs_to(TabGroup))]
 pub struct Tab {
     pub id: i32,
     pub window_id: i32,
     pub custom_title: Option<String>,
     pub color: Option<String>,
+    pub tab_group_id: Option<i32>,
 }
 
 #[derive(Insertable)]
@@ -356,6 +358,32 @@ pub struct NewTab {
     pub window_id: i32,
     pub custom_title: Option<String>,
     pub color: Option<String>,
+    pub tab_group_id: Option<i32>,
+}
+
+/// Cmux-style "Workspace" sidebar entry. A window owns N `TabGroup`s, and each
+/// `Tab` may belong to at most one group via [`Tab::tab_group_id`]. Tabs whose
+/// `tab_group_id` is `NULL` belong to the implicit default group of their
+/// window. See `specs/cmux-workspaces/` for the full design.
+#[derive(Identifiable, Queryable, Associations)]
+#[diesel(belongs_to(Window))]
+pub struct TabGroup {
+    pub id: i32,
+    pub window_id: i32,
+    pub name: String,
+    pub color: Option<String>,
+    pub position: i32,
+    pub is_active: bool,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = tab_groups)]
+pub struct NewTabGroup {
+    pub window_id: i32,
+    pub name: String,
+    pub color: Option<String>,
+    pub position: i32,
+    pub is_active: bool,
 }
 
 /// The panes data model includes pane_nodes, pane_leaves and pane_branches.
