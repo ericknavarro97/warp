@@ -9907,6 +9907,10 @@ impl Workspace {
                         .unwrap_or_default(),
                     left_panel,
                     right_panel,
+                    // Phase 2 wires up the snapshot field. Phase 3 will surface
+                    // the active group via the `Workspace` view; for now every
+                    // tab still belongs to the implicit default group.
+                    tab_group_index: None,
                 }
             })
             .filter(|tab| {
@@ -9990,6 +9994,11 @@ impl Workspace {
             left_panel_width,
             right_panel_width,
             agent_management_filters,
+            // Phase 2: the snapshot field is wired up but no UI surfaces or
+            // mutates groups yet. Until Phase 3 the workspace always emits
+            // an empty `tab_groups` (legacy / implicit default group shape).
+            tab_groups: Vec::new(),
+            active_tab_group_index: 0,
         }
     }
 

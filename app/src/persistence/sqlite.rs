@@ -41,10 +41,10 @@ use super::block_list::{
 };
 use super::model::{
     self, ActiveMCPServer, CurrentUserInformation, MCPEnvironmentVariables, NewActiveMCPServer,
-    NewApp, NewCommand, NewFolder, NewNotebook, NewServerExperiment, NewTab, NewTeam, NewWindow,
-    NewWorkspace, NewWorkspaceMetadata, NewWorkspaceTeam, ObjectMetadata, ObjectPermissions,
-    Project, Tab, Window, WorkspaceMetadata as WorkspaceMetadataModel, AI_DOCUMENT_PANE_KIND,
-    AI_FACT_PANE_KIND, CODE_PANE_KIND, ENV_VAR_COLLECTION_PANE_KIND,
+    NewApp, NewCommand, NewFolder, NewNotebook, NewServerExperiment, NewTab, NewTabGroup, NewTeam,
+    NewWindow, NewWorkspace, NewWorkspaceMetadata, NewWorkspaceTeam, ObjectMetadata,
+    ObjectPermissions, Project, Tab, TabGroup, Window, WorkspaceMetadata as WorkspaceMetadataModel,
+    AI_DOCUMENT_PANE_KIND, AI_FACT_PANE_KIND, CODE_PANE_KIND, ENV_VAR_COLLECTION_PANE_KIND,
     EXECUTION_PROFILE_EDITOR_PANE_KIND, MCP_SERVER_PANE_KIND, NOTEBOOK_PANE_KIND,
     SETTINGS_PANE_KIND, TERMINAL_PANE_KIND, WELCOME_PANE_KIND, WORKFLOW_PANE_KIND,
 };
@@ -115,7 +115,7 @@ use crate::{
     app_state::{
         AppState, BranchSnapshot, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents,
         LeafSnapshot, NotebookPaneSnapshot, PaneFlex, PaneNodeSnapshot, SplitDirection,
-        TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+        TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
     },
     workspaces::user_profiles::UserProfileWithUID,
 };
@@ -889,6 +889,37 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                 active_window_id = Some(window_id)
             }
 
+            // cmux-style workspaces (Phase 2): persist this window's
+            // `tab_groups` *before* the tabs so the FK in `tabs.tab_group_id`
+            // can reference the freshly-assigned ids. Empty `tab_groups`
+            // (legacy/implicit-default-group windows) is a no-op insert.
+            let snapshot_idx_to_db_group_id: Vec<i32> = if window.tab_groups.is_empty() {
+                Vec::new()
+            } else {
+                let new_tab_groups: Vec<NewTabGroup> = window
+                    .tab_groups
+                    .iter()
+                    .map(|g| NewTabGroup {
+                        window_id,
+                        name: g.name.clone(),
+                        color: g.color.clone(),
+                        position: g.position,
+                        is_active: g.is_active,
+                    })
+                    .collect();
+                diesel::insert_into(schema::tab_groups::dsl::tab_groups)
+                    .values(&new_tab_groups)
+                    .execute(conn)?;
+                let descending_ids: Vec<i32> = schema::tab_groups::dsl::tab_groups
+                    .filter(schema::tab_groups::columns::window_id.eq(window_id))
+                    .select(schema::tab_groups::columns::id)
+                    .order(schema::tab_groups::columns::id.desc())
+                    .load(conn)?;
+                // Reverse so index 0 matches the first inserted row, mirroring
+                // the snapshot order in `window.tab_groups`.
+                descending_ids.into_iter().rev().collect()
+            };
+
             let tabs: Vec<NewTab> = window
                 .tabs
                 .iter()
@@ -902,10 +933,9 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                         SelectedTabColor::Unset => None,
                         _ => serde_yaml::to_string(&tab.selected_color).ok(),
                     },
-                    // Phase 1 of cmux-style workspaces only adds the schema.
-                    // Group assignment is wired up in Phase 2 once the snapshot
-                    // model carries `WindowSnapshot::tab_groups`.
-                    tab_group_id: None,
+                    tab_group_id: tab
+                        .tab_group_index
+                        .and_then(|i| snapshot_idx_to_db_group_id.get(i).copied()),
                 })
                 .collect();
 
@@ -2672,6 +2702,17 @@ fn read_sqlite_data(
         .load::<Tab>(conn)?
         .grouped_by(&db_windows);
 
+    // cmux-style workspaces (Phase 2): pre-load every window's `tab_groups`
+    // ordered by their saved `position` so the resulting `TabGroupSnapshot`
+    // vector matches the sidebar order from the previous run.
+    let db_tab_groups = TabGroup::belonging_to(&db_windows)
+        .order_by((
+            schema::tab_groups::columns::position.asc(),
+            schema::tab_groups::columns::id.asc(),
+        ))
+        .load::<TabGroup>(conn)?
+        .grouped_by(&db_windows);
+
     let db_panels = schema::panels::dsl::panels
         .load::<model::Panel>(conn)?
         .into_iter()
@@ -2682,7 +2723,32 @@ fn read_sqlite_data(
         .into_iter()
         .enumerate()
         .zip(db_tabs)
-        .map(|((idx, window), tabs_for_window)| {
+        .zip(db_tab_groups)
+        .map(|(((idx, window), tabs_for_window), groups_for_window)| {
+            // Materialize the snapshot view of this window's tab_groups and
+            // index them so per-tab `tab_group_id` lookups are O(1). When a
+            // window has no rows in `tab_groups` (legacy data) we leave
+            // `tab_groups` empty -- consumers treat that as "single implicit
+            // default group".
+            let tab_groups: Vec<TabGroupSnapshot> = groups_for_window
+                .iter()
+                .map(|g| TabGroupSnapshot {
+                    name: g.name.clone(),
+                    color: g.color.clone(),
+                    position: g.position,
+                    is_active: g.is_active,
+                })
+                .collect();
+            let group_id_to_index: HashMap<i32, usize> = groups_for_window
+                .iter()
+                .enumerate()
+                .map(|(i, g)| (g.id, i))
+                .collect();
+            let active_tab_group_index = groups_for_window
+                .iter()
+                .position(|g| g.is_active)
+                .unwrap_or(0);
+
             let saved_tabs: Vec<_> = tabs_for_window
                 .into_iter()
                 .filter_map(|tab| {
@@ -2696,6 +2762,10 @@ fn read_sqlite_data(
                     let right_panel = panel
                         .and_then(|p| p.right_panel.as_ref())
                         .and_then(|s| serde_json::from_str::<RightPanelSnapshot>(s).ok());
+
+                    let tab_group_index = tab
+                        .tab_group_id
+                        .and_then(|gid| group_id_to_index.get(&gid).copied());
 
                     Some(TabSnapshot {
                         root,
@@ -2717,6 +2787,7 @@ fn read_sqlite_data(
                             .unwrap_or_default(),
                         left_panel,
                         right_panel,
+                        tab_group_index,
                     })
                 })
                 .collect();
@@ -2802,6 +2873,8 @@ fn read_sqlite_data(
                 agent_management_filters: window
                     .agent_management_filters
                     .and_then(|s| serde_json::from_str(&s).ok()),
+                tab_groups,
+                active_tab_group_index,
             }
         })
         .collect();
