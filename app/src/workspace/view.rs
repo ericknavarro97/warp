@@ -12,6 +12,7 @@ pub(crate) mod onboarding;
 pub(crate) mod openwarp_launch_modal;
 pub(crate) mod right_panel;
 mod startup_directory;
+mod tab_group_switcher;
 #[cfg(test)]
 #[path = "view_test.rs"]
 mod tests;
