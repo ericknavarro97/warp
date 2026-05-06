@@ -20373,6 +20373,39 @@ impl TypedActionView for Workspace {
             OpenNetworkLogPane => {
                 self.open_network_log_pane(ctx);
             }
+            // -- cmux-style workspaces (Phase 3) --
+            // Dispatch is wired but the registry/UI mutations land in
+            // Phase 4 together with the sidebar. The stubs let the
+            // keybindings exist today (so muscle memory carries over)
+            // without producing runtime panics.
+            ActivateTabGroup(idx) => {
+                log::warn!(
+                    "ActivateTabGroup({idx}) is a Phase 3 stub; sidebar lands in Phase 4"
+                );
+            }
+            NewTabGroup => {
+                log::warn!("NewTabGroup is a Phase 3 stub; sidebar lands in Phase 4");
+            }
+            CloseTabGroup(idx) => {
+                log::warn!(
+                    "CloseTabGroup({idx}) is a Phase 3 stub; sidebar lands in Phase 4"
+                );
+            }
+            RenameTabGroup { index, name } => {
+                log::warn!(
+                    "RenameTabGroup({index}, {name:?}) is a Phase 3 stub; sidebar lands in Phase 4"
+                );
+            }
+            MoveTabGroupLeft(idx) => {
+                log::warn!(
+                    "MoveTabGroupLeft({idx}) is a Phase 3 stub; sidebar lands in Phase 4"
+                );
+            }
+            MoveTabGroupRight(idx) => {
+                log::warn!(
+                    "MoveTabGroupRight({idx}) is a Phase 3 stub; sidebar lands in Phase 4"
+                );
+            }
             FixSettingsWithOz { error_description } => {
                 use crate::ai::skills::SkillManager;
                 let modify_settings_skill = SkillManager::as_ref(ctx)

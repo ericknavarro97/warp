@@ -676,6 +676,35 @@ pub enum WorkspaceAction {
     /// Opens (or focuses) the in-app network log pane as a right-split of the
     /// active pane group. Gated on `ContextFlag::NetworkLogConsole`.
     OpenNetworkLogPane,
+    // -- cmux-style workspaces (Phase 3) ---------------------------------
+    // The next six variants drive the per-window vertical workspace
+    // switcher. They are dispatched from the new keybindings (Cmd+Shift+T,
+    // Cmd+Shift+1..9, Cmd+Shift+W, etc.) and from the sidebar UI added in
+    // Phase 4. Handlers in `Workspace::handle_action` are stubs in this
+    // commit; the Workspace registry refactor that actually mutates state
+    // lands together with the UI.
+    /// Activates the tab group at the given index inside the current
+    /// window's `WindowSnapshot::tab_groups`. No-op for legacy windows
+    /// (empty `tab_groups`).
+    ActivateTabGroup(usize),
+    /// Creates a new tab group at the end of the sidebar containing a
+    /// fresh default terminal tab.
+    NewTabGroup,
+    /// Closes the tab group at `index`, prompting if any tab inside has a
+    /// long-running process.
+    CloseTabGroup(usize),
+    /// Renames the tab group at `index`. The empty-string case resets the
+    /// name to the auto-generated one.
+    RenameTabGroup {
+        index: usize,
+        name: String,
+    },
+    /// Reorders the tab group at `index` one slot to the left in the
+    /// sidebar. No-op when the group is already first.
+    MoveTabGroupLeft(usize),
+    /// Reorders the tab group at `index` one slot to the right in the
+    /// sidebar. No-op when the group is already last.
+    MoveTabGroupRight(usize),
 }
 
 impl From<&WorkspaceAction> for LoginGatedFeature {
@@ -719,6 +748,12 @@ impl WorkspaceAction {
             ContinueConversationLocally { .. } => true,
             ActivateTab(_)
             | ActivateTabByNumber(_)
+            | ActivateTabGroup(_)
+            | NewTabGroup
+            | CloseTabGroup(_)
+            | RenameTabGroup { .. }
+            | MoveTabGroupLeft(_)
+            | MoveTabGroupRight(_)
             | ActivatePrevTab
             | ActivateNextTab
             | ActivateLastTab
