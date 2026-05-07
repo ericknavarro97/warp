@@ -1,14 +1,26 @@
-//! Skeleton for the cmux-style "Workspace" sidebar (Phase 4).
+//! cmux-style "Workspace" sidebar.
 //!
-//! This module holds state and pure helpers that the sidebar UI added in
-//! Phase 4.5 will render against. Everything in here is gated behind
-//! `FeatureFlag::CmuxStyleWorkspaces` -- no caller exists yet, but the
-//! types are public so the eventual `render_tab_group_switcher` element
-//! tree (and its `Workspace` view integration) lands in a focused PR
-//! without further data-shape churn.
+//! Renders a per-window vertical list of [`TabGroupSnapshot`]s with the
+//! active group highlighted. Gated behind
+//! `FeatureFlag::CmuxStyleWorkspaces`. See `specs/cmux-workspaces/` for
+//! the full design.
 //!
-//! See `specs/cmux-workspaces/` for the full design.
+//! The renderer is deliberately minimal -- no scroll, no drag-and-drop,
+//! no click handling -- because users drive the sidebar from
+//! `Cmd+Shift+T` and `Cmd+Shift+1..8` (registered in
+//! `app/src/workspace/mod.rs`). Polishing chrome (hover states, drag
+//! reorder, color stripes from `TabGroupSnapshot::color`,
+//! `TabGroupRuntimeMetadata` badges) lands in subsequent PRs.
 use crate::app_state::TabGroupSnapshot;
+use crate::appearance::Appearance;
+use warp_core::ui::theme::color::internal_colors;
+use warpui::elements::{
+    Container, CrossAxisAlignment, Element, Empty, Flex, MainAxisSize, Padding, ParentElement,
+    Text,
+};
+use warpui::{AppContext, SingletonEntity};
+
+use super::Workspace;
 
 /// Sidebar position. Mirrors the existing `super::PanelPosition` so the
 /// switcher panel can be rendered on either side without re-parameterizing
@@ -75,6 +87,81 @@ pub(crate) fn active_group<'a>(
 /// off see no UI delta whatsoever.
 pub(crate) fn should_render_switcher(feature_enabled: bool, panel_open: bool) -> bool {
     feature_enabled && panel_open
+}
+
+/// Resolves the user-visible label for the group at `index` in
+/// `groups`. Falls back to the auto-generated `Workspace N` form when
+/// the user hasn't named it yet (or has explicitly cleared the name).
+fn display_label(groups: &[TabGroupSnapshot], index: usize) -> String {
+    match groups.get(index) {
+        Some(g) if !g.name.is_empty() => g.name.clone(),
+        _ => format!("Workspace {}", index + 1),
+    }
+}
+
+/// Render the cmux-style sidebar. Returns the bare element tree -- the
+/// `SavePosition` wrapping is the caller's responsibility so this
+/// function stays composable across both left and right placements.
+pub(crate) fn render_tab_group_switcher(
+    workspace: &Workspace,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font_family = appearance.ui_font_family();
+    let row_padding = Padding::uniform(0.).with_vertical(8.).with_horizontal(12.);
+    let header_padding = Padding::uniform(0.).with_vertical(10.).with_horizontal(12.);
+
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+    column.add_child(
+        Container::new(Text::new_inline("Workspaces", font_family, 12.).finish())
+            .with_padding(header_padding)
+            .finish(),
+    );
+
+    if workspace.tab_groups.is_empty() {
+        column.add_child(
+            Container::new(
+                Text::new_inline(
+                    "No workspaces yet. Press Cmd+Shift+T to create one.",
+                    font_family,
+                    11.,
+                )
+                .finish(),
+            )
+            .with_padding(row_padding)
+            .finish(),
+        );
+    } else {
+        for (idx, _group) in workspace.tab_groups.iter().enumerate() {
+            let is_active = idx == workspace.active_tab_group_index;
+            let bg = if is_active {
+                internal_colors::fg_overlay_2(theme)
+            } else {
+                internal_colors::fg_overlay_1(theme)
+            };
+            let label = display_label(&workspace.tab_groups, idx);
+            column.add_child(
+                Container::new(Text::new_inline(label, font_family, 12.).finish())
+                    .with_background(bg)
+                    .with_padding(row_padding)
+                    .finish(),
+            );
+        }
+    }
+
+    Container::new(column.finish())
+        .with_background(internal_colors::fg_overlay_1(theme))
+        .with_padding(Padding::uniform(0.))
+        .finish()
+}
+
+#[allow(dead_code)]
+fn _unused_empty_placeholder() -> Box<dyn Element> {
+    Empty::new().finish()
 }
 
 /// Live, per-group sidebar metadata (Phase 5). Deliberately *not* part

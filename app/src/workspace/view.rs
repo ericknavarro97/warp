@@ -19573,13 +19573,16 @@ impl Workspace {
                 if !self.vertical_tabs_panel_open {
                     return None;
                 }
-                Some(
-                    SavePosition::new(
-                        self.render_vertical_tabs_panel(Self::tabs_panel_side(config), app),
-                        VERTICAL_TABS_PANEL_POSITION_ID,
-                    )
-                    .finish(),
-                )
+                // cmux-style sidebar takes over the vertical-tabs slot
+                // when the feature is on for this window. Legacy
+                // windows (empty `tab_groups`) keep the existing
+                // vertical_tabs panel.
+                let panel = if self.cmux_sidebar_active() {
+                    tab_group_switcher::render_tab_group_switcher(self, app)
+                } else {
+                    self.render_vertical_tabs_panel(Self::tabs_panel_side(config), app)
+                };
+                Some(SavePosition::new(panel, VERTICAL_TABS_PANEL_POSITION_ID).finish())
             }
             HeaderToolbarItemKind::ToolsPanel => {
                 if !pane_group.left_panel_open || warpui::platform::is_mobile_device() {
