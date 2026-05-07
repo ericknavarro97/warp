@@ -3607,6 +3607,7 @@ impl Workspace {
                 shell,
             } => {
                 self.configure_empty_workspace(previous_active_window, shell, ctx);
+                self.maybe_backfill_default_tab_group();
                 self.maybe_auto_open_conversation_list(ctx);
             }
             NewWorkspaceSource::Restored {
@@ -3675,11 +3676,13 @@ impl Workspace {
                 }
 
                 self.activate_tab_internal(active_tab_index, ctx);
+                self.maybe_backfill_default_tab_group();
                 self.check_and_trigger_onboarding(ctx);
                 self.maybe_auto_open_conversation_list(ctx);
             }
             NewWorkspaceSource::FromTemplate { window_template } => {
                 self.open_launch_config_window(window_template, ctx);
+                self.maybe_backfill_default_tab_group();
                 self.check_and_trigger_onboarding(ctx);
             }
             NewWorkspaceSource::Session { options } => {
@@ -4995,6 +4998,33 @@ impl Workspace {
     /// horizontal-tab-bar behaviour even when the flag is on.
     pub(crate) fn cmux_sidebar_active(&self) -> bool {
         FeatureFlag::CmuxStyleWorkspaces.is_enabled() && !self.tab_groups.is_empty()
+    }
+
+    /// First-launch backfill: when the user has just enabled
+    /// `CmuxStyleWorkspaces` but the persisted `tab_groups` is empty,
+    /// synthesize a `Workspace 1` entry so the sidebar has something
+    /// concrete to render. Existing tabs keep `tab_group_index = None`
+    /// (the SQLite NULL convention), which `tab_in_active_group` maps
+    /// to group 0 -- so the visible tab bar is unchanged. This is
+    /// idempotent and a no-op when the flag is off, when groups
+    /// already exist, or when the window has no tabs yet.
+    pub(crate) fn maybe_backfill_default_tab_group(&mut self) {
+        if !FeatureFlag::CmuxStyleWorkspaces.is_enabled() {
+            return;
+        }
+        if !self.tab_groups.is_empty() {
+            return;
+        }
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.tab_groups.push(TabGroupSnapshot {
+            name: String::from("Workspace 1"),
+            color: None,
+            position: 0,
+            is_active: true,
+        });
+        self.active_tab_group_index = 0;
     }
 
     /// Returns the group index a freshly-created tab should inherit.
