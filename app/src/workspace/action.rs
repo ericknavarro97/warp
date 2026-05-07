@@ -699,6 +699,15 @@ pub enum WorkspaceAction {
         index: usize,
         name: String,
     },
+    /// Begins an inline rename on the tab group at `index` -- focuses
+    /// the shared `tab_group_rename_editor`, pre-fills it with the
+    /// current label, and selects the text. Submit (Enter / blur)
+    /// dispatches the actual `RenameTabGroup`. Esc cancels.
+    BeginRenameTabGroup(usize),
+    /// Sugar for `BeginRenameTabGroup(active_tab_group_index)`. Bound
+    /// to `Cmd+Shift+R` so users can rename the focused workspace
+    /// without leaving the keyboard.
+    BeginRenameActiveTabGroup,
     /// Reorders the tab group at `index` one slot to the left in the
     /// sidebar. No-op when the group is already first.
     MoveTabGroupLeft(usize),
@@ -982,7 +991,9 @@ impl WorkspaceAction {
             | OpenSettingsFile
             | FixSettingsWithOz { .. }
             | OpenLocalToCloudHandoffPane { .. }
-            | OpenNetworkLogPane => false,
+            | OpenNetworkLogPane
+            | BeginRenameTabGroup(_)
+            | BeginRenameActiveTabGroup => false,
             #[cfg(debug_assertions)]
             ShowHoaOnboardingFlow => false,
             #[cfg(target_family = "wasm")]

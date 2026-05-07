@@ -936,6 +936,20 @@ pub struct Workspace {
     /// the renderer that consumes this lands in Subphase C).
     #[allow(dead_code)] // read by Subphase C renderer.
     pub(crate) tab_group_switcher_state: tab_group_switcher::TabGroupSwitcherState,
+    /// Single shared inline editor used to rename the tab group at
+    /// `tab_group_being_renamed`. Mirrors `tab_rename_editor` for
+    /// horizontal tabs.
+    pub(crate) tab_group_rename_editor: ViewHandle<EditorView>,
+    /// `Some(idx)` while the user is editing the name of the group at
+    /// `idx`. The renderer swaps the row's `Text` for an inline
+    /// `ChildView` of `tab_group_rename_editor` only for the matching
+    /// index.
+    pub(crate) tab_group_being_renamed: Option<usize>,
+    /// Per-row mouse state handles, keyed by group index. Created lazily
+    /// inside the renderer so adding/removing rows doesn't require
+    /// out-of-band bookkeeping.
+    pub(crate) tab_group_row_mouse_states:
+        std::cell::RefCell<std::collections::HashMap<usize, MouseStateHandle>>,
     pub(crate) hovered_tab_index: Option<TabBarHoverIndex>,
     tab_bar_hover_state: MouseStateHandle,
     tab_fixed_width: Option<f32>,
@@ -1318,6 +1332,81 @@ impl Workspace {
             me.handle_pane_rename_editor_event(event, ctx);
         });
         editor
+    }
+
+    fn tab_group_rename_editor(ctx: &mut ViewContext<Self>) -> ViewHandle<EditorView> {
+        let editor = ctx.add_typed_action_view(|ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let options = SingleLineEditorOptions {
+                text: TextOptions::ui_text(Some(12.), appearance),
+                ..Default::default()
+            };
+            EditorView::single_line(options, ctx)
+        });
+        ctx.subscribe_to_view(&editor, move |me, _, event, ctx| {
+            me.handle_tab_group_rename_editor_event(event, ctx);
+        });
+        editor
+    }
+
+    pub fn handle_tab_group_rename_editor_event(
+        &mut self,
+        event: &EditorEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.tab_group_being_renamed.is_some() {
+            match event {
+                EditorEvent::Blurred | EditorEvent::Enter => {
+                    self.finish_tab_group_rename(ctx);
+                }
+                EditorEvent::Escape => {
+                    self.cancel_tab_group_rename(ctx);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Open the inline rename editor over the tab group at `index`. The
+    /// editor is pre-filled with the current label (auto-generated when
+    /// the user has not yet named the group) and the text is fully
+    /// selected so typing replaces it.
+    pub fn begin_rename_tab_group(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        if index >= self.tab_groups.len() {
+            return;
+        }
+        let initial_text = if self.tab_groups[index].name.is_empty() {
+            format!("Workspace {}", index + 1)
+        } else {
+            self.tab_groups[index].name.clone()
+        };
+        self.tab_group_being_renamed = Some(index);
+        self.tab_group_rename_editor.update(ctx, move |editor, ctx| {
+            editor.insert_selected_text(&initial_text, ctx);
+        });
+        ctx.focus(&self.tab_group_rename_editor);
+        ctx.notify();
+    }
+
+    fn finish_tab_group_rename(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(index) = self.tab_group_being_renamed.take() else {
+            return;
+        };
+        let new_name = self
+            .tab_group_rename_editor
+            .as_ref(ctx)
+            .buffer_text(ctx)
+            .trim()
+            .to_string();
+        // Empty name resets to the auto-generated label, matching the
+        // behaviour the renderer's `display_label` already implements.
+        self.rename_tab_group(index, new_name, ctx);
+        ctx.dispatch_global_action("workspace:save_app", ());
+    }
+
+    fn cancel_tab_group_rename(&mut self, ctx: &mut ViewContext<Self>) {
+        self.tab_group_being_renamed = None;
+        ctx.notify();
     }
 
     pub fn handle_tab_rename_editor_event(
@@ -3101,6 +3190,9 @@ impl Workspace {
             tab_bar_hover_state: Default::default(),
             traffic_light_mouse_states: Default::default(),
             tab_rename_editor: Self::tab_rename_editor(ctx),
+            tab_group_rename_editor: Self::tab_group_rename_editor(ctx),
+            tab_group_being_renamed: None,
+            tab_group_row_mouse_states: Default::default(),
             pane_rename_editor: Self::pane_rename_editor(ctx),
             vertical_tabs_search_input: Self::vertical_tabs_search_input(ctx),
             tips_completed,
@@ -20633,6 +20725,13 @@ impl TypedActionView for Workspace {
             }
             RenameTabGroup { index, name } => {
                 self.rename_tab_group(*index, name.clone(), ctx);
+            }
+            BeginRenameTabGroup(idx) => {
+                self.begin_rename_tab_group(*idx, ctx);
+            }
+            BeginRenameActiveTabGroup => {
+                let idx = self.active_tab_group_index;
+                self.begin_rename_tab_group(idx, ctx);
             }
             MoveTabGroupLeft(idx) => {
                 self.move_tab_group(*idx, TabGroupMoveDirection::Left, ctx);

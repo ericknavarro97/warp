@@ -638,6 +638,14 @@ pub fn init(app: &mut AppContext) {
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_key_binding("cmdorctrl-shift-8"),
         EditableBinding::new(
+            "workspace:rename_active_tab_group",
+            "Rename the active workspace",
+            WorkspaceAction::BeginRenameActiveTabGroup,
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Settings.as_str())
+        .with_key_binding("cmdorctrl-shift-r"),
+        EditableBinding::new(
             "workspace:activate_prev_tab",
             "Activate previous tab",
             WorkspaceAction::ActivatePrevTab,

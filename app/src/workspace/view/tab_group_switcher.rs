@@ -13,10 +13,11 @@
 //! `TabGroupRuntimeMetadata` badges) lands in subsequent PRs.
 use crate::app_state::TabGroupSnapshot;
 use crate::appearance::Appearance;
+use crate::workspace::WorkspaceAction;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    Container, CrossAxisAlignment, Element, Empty, Flex, MainAxisSize, Padding, ParentElement,
-    Text,
+    ChildView, Container, CrossAxisAlignment, Element, Empty, Flex, Hoverable, MainAxisSize,
+    MouseStateHandle, Padding, ParentElement, Text,
 };
 use warpui::{AppContext, SingletonEntity};
 
@@ -138,18 +139,47 @@ pub(crate) fn render_tab_group_switcher(
     } else {
         for (idx, _group) in workspace.tab_groups.iter().enumerate() {
             let is_active = idx == workspace.active_tab_group_index;
+            let is_renaming = workspace.tab_group_being_renamed == Some(idx);
             let bg = if is_active {
                 internal_colors::fg_overlay_2(theme)
             } else {
                 internal_colors::fg_overlay_1(theme)
             };
-            let label = display_label(&workspace.tab_groups, idx);
-            column.add_child(
-                Container::new(Text::new_inline(label, font_family, 12.).finish())
+
+            // Body of the row: either the inline rename editor or the
+            // static label.
+            let body: Box<dyn Element> = if is_renaming {
+                ChildView::new(&workspace.tab_group_rename_editor).finish()
+            } else {
+                Text::new_inline(display_label(&workspace.tab_groups, idx), font_family, 12.)
+                    .finish()
+            };
+
+            // Stable mouse state per row so hover/double-click
+            // bookkeeping survives re-renders. Created lazily.
+            let mouse_state = workspace
+                .tab_group_row_mouse_states
+                .borrow_mut()
+                .entry(idx)
+                .or_insert_with(MouseStateHandle::default)
+                .clone();
+
+            let row_padding_clone = row_padding;
+            let mut row = Hoverable::new(mouse_state, move |_state| {
+                Container::new(body)
                     .with_background(bg)
-                    .with_padding(row_padding)
-                    .finish(),
-            );
+                    .with_padding(row_padding_clone)
+                    .finish()
+            });
+            // While the editor is mounted in the row, suppress the
+            // double-click handler so clicks inside the editor don't
+            // re-trigger the rename flow.
+            if !is_renaming {
+                row = row.on_double_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(WorkspaceAction::BeginRenameTabGroup(idx));
+                });
+            }
+            column.add_child(row.finish());
         }
     }
 
