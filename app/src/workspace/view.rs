@@ -82,8 +82,8 @@ use crate::ai::{
 use crate::ai_assistant::execution_context::WarpAiExecutionContext;
 use crate::app_state::{
     LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot, NotebookPaneSnapshot,
-    PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot, TabSnapshot,
-    TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
+    PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot, TabGroupSnapshot,
+    TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
 };
 use crate::code_review::diff_state::DiffStateModel;
 #[cfg(feature = "local_fs")]
@@ -912,10 +912,30 @@ pub struct TransferredTab {
     pub draggable_state: DraggableState,
 }
 
+/// Direction passed to [`Workspace::move_tab_group`]. Distinct from the
+/// search-bar's private `MoveDirection` to avoid cross-module aliasing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TabGroupMoveDirection {
+    Left,
+    Right,
+}
+
 pub struct Workspace {
     window_id: WindowId,
     pub(crate) tabs: Vec<TabData>,
     active_tab_index: usize,
+    /// cmux-style "Workspace" sidebar entries owned by this window.
+    /// Empty `Vec` is the legacy / pre-feature shape and is interpreted
+    /// as a single implicit default group containing every tab.
+    /// See `specs/cmux-workspaces/`.
+    pub(crate) tab_groups: Vec<TabGroupSnapshot>,
+    /// Index into [`Self::tab_groups`]. Always `0` when `tab_groups` is
+    /// empty (refers to the implicit default group in that case).
+    pub(crate) active_tab_group_index: usize,
+    /// View-local UI state for the cmux-style sidebar (Phase 4 skeleton;
+    /// the renderer that consumes this lands in Subphase C).
+    #[allow(dead_code)] // read by Subphase C renderer.
+    pub(crate) tab_group_switcher_state: tab_group_switcher::TabGroupSwitcherState,
     pub(crate) hovered_tab_index: Option<TabBarHoverIndex>,
     tab_bar_hover_state: MouseStateHandle,
     tab_fixed_width: Option<f32>,
@@ -3074,6 +3094,9 @@ impl Workspace {
         let mut ws = Self {
             tabs: Vec::new(),
             active_tab_index: 0,
+            tab_groups: Vec::new(),
+            active_tab_group_index: 0,
+            tab_group_switcher_state: tab_group_switcher::TabGroupSwitcherState::default(),
             hovered_tab_index: None,
             tab_bar_hover_state: Default::default(),
             traffic_light_mouse_states: Default::default(),
@@ -3623,6 +3646,13 @@ impl Workspace {
                             );
                         }
                     });
+
+                // Restore cmux-style tab groups. Empty `tab_groups` keeps
+                // the legacy single-implicit-default-group semantics.
+                self.tab_groups = window_snapshot.tab_groups.clone();
+                self.active_tab_group_index = window_snapshot
+                    .active_tab_group_index
+                    .min(self.tab_groups.len().saturating_sub(1).max(0));
 
                 if self.tab_count() == 0 {
                     if self.should_trigger_get_started_onboarding(ctx) {
@@ -4875,6 +4905,127 @@ impl Workspace {
     /// This is meant to be dispatched directly by actions.
     pub fn activate_tab(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
         self.activate_tab_internal(index, ctx);
+        ctx.notify();
+    }
+
+    // -- cmux-style workspaces: real handlers --------------------------
+    // These mutate `self.tab_groups` directly. The dispatcher wraps each
+    // call with `should_save_app_state_on_action`, so persistence happens
+    // automatically via `Workspace::snapshot`. Tab filtering (Subphase B)
+    // and the sidebar UI (Subphase C) consume these state changes.
+
+    /// Activate the tab group at `index`. Out-of-bounds indices are
+    /// silently ignored to make the keybindings ergonomic on windows
+    /// with fewer than 8 groups.
+    fn activate_tab_group(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        if index >= self.tab_groups.len() {
+            return;
+        }
+        for (i, group) in self.tab_groups.iter_mut().enumerate() {
+            group.is_active = i == index;
+        }
+        self.active_tab_group_index = index;
+        ctx.notify();
+    }
+
+    /// Append a fresh tab group named `Workspace N` and make it active.
+    /// Existing tabs stay in their current group; the new group starts
+    /// empty and the user populates it via the next session/tab they
+    /// create (tab routing into the active group is wired in Subphase B).
+    fn new_tab_group(&mut self, ctx: &mut ViewContext<Self>) {
+        let new_index = self.tab_groups.len();
+        let position = self
+            .tab_groups
+            .iter()
+            .map(|g| g.position)
+            .max()
+            .unwrap_or(-1)
+            + 1;
+        for group in self.tab_groups.iter_mut() {
+            group.is_active = false;
+        }
+        self.tab_groups.push(TabGroupSnapshot {
+            name: format!("Workspace {}", new_index + 1),
+            color: None,
+            position,
+            is_active: true,
+        });
+        self.active_tab_group_index = new_index;
+        ctx.notify();
+    }
+
+    /// Remove the tab group at `index`. Tabs that referenced it fall
+    /// back to the implicit default group (their `tab_group_index`
+    /// becomes `None`). The active index follows the removed slot --
+    /// closing the active group activates whatever is now at that
+    /// position, clamped to the new end of the list.
+    fn close_tab_group(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        if index >= self.tab_groups.len() {
+            return;
+        }
+        // Re-target tabs that pointed at the removed group, and shift
+        // indices for tabs that pointed at a later group down by one.
+        for tab in self.tabs.iter_mut() {
+            // `TabData` does not carry a `tab_group_index` field today
+            // -- that lives on the persisted `TabSnapshot`. Subphase B
+            // mirrors it onto `TabData` so the horizontal tab bar can
+            // filter; until then closing a group only adjusts the
+            // surviving group entries below.
+            let _ = tab;
+        }
+        self.tab_groups.remove(index);
+        for (i, group) in self.tab_groups.iter_mut().enumerate() {
+            group.position = i as i32;
+        }
+        if self.tab_groups.is_empty() {
+            self.active_tab_group_index = 0;
+        } else {
+            self.active_tab_group_index =
+                self.active_tab_group_index.min(self.tab_groups.len() - 1);
+            for (i, group) in self.tab_groups.iter_mut().enumerate() {
+                group.is_active = i == self.active_tab_group_index;
+            }
+        }
+        ctx.notify();
+    }
+
+    /// Rename the tab group at `index`. An empty `name` is allowed and
+    /// signals "use the auto-generated label" -- the renderer in
+    /// Subphase C falls back to `Workspace {index + 1}` in that case.
+    fn rename_tab_group(
+        &mut self,
+        index: usize,
+        name: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(group) = self.tab_groups.get_mut(index) {
+            group.name = name;
+            ctx.notify();
+        }
+    }
+
+    /// Reorder the tab group at `index` one slot in `direction`. No-op
+    /// at the boundary. The active index follows the moved group.
+    fn move_tab_group(
+        &mut self,
+        index: usize,
+        direction: TabGroupMoveDirection,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let target = match direction {
+            TabGroupMoveDirection::Left if index > 0 => index - 1,
+            TabGroupMoveDirection::Right if index + 1 < self.tab_groups.len() => index + 1,
+            _ => return,
+        };
+        self.tab_groups.swap(index, target);
+        for (i, group) in self.tab_groups.iter_mut().enumerate() {
+            group.position = i as i32;
+        }
+        if self.active_tab_group_index == index {
+            self.active_tab_group_index = target;
+        } else if self.active_tab_group_index == target {
+            self.active_tab_group_index = index;
+        }
         ctx.notify();
     }
 
@@ -9995,11 +10146,8 @@ impl Workspace {
             left_panel_width,
             right_panel_width,
             agent_management_filters,
-            // Phase 2: the snapshot field is wired up but no UI surfaces or
-            // mutates groups yet. Until Phase 3 the workspace always emits
-            // an empty `tab_groups` (legacy / implicit default group shape).
-            tab_groups: Vec::new(),
-            active_tab_group_index: 0,
+            tab_groups: self.tab_groups.clone(),
+            active_tab_group_index: self.active_tab_group_index,
         }
     }
 
@@ -20374,38 +20522,29 @@ impl TypedActionView for Workspace {
             OpenNetworkLogPane => {
                 self.open_network_log_pane(ctx);
             }
-            // -- cmux-style workspaces (Phase 3) --
-            // Dispatch is wired but the registry/UI mutations land in
-            // Phase 4 together with the sidebar. The stubs let the
-            // keybindings exist today (so muscle memory carries over)
-            // without producing runtime panics.
+            // -- cmux-style workspaces ---------------------------------
+            // Real handlers that mutate `self.tab_groups`. Tab filtering
+            // (showing only the active group's tabs in the horizontal
+            // tab bar) and the sidebar UI live in Subphases B/C of this
+            // PR series. The dispatcher already calls `save_app_state`
+            // after every mutation via `should_save_app_state_on_action`.
             ActivateTabGroup(idx) => {
-                log::warn!(
-                    "ActivateTabGroup({idx}) is a Phase 3 stub; sidebar lands in Phase 4"
-                );
+                self.activate_tab_group(*idx, ctx);
             }
             NewTabGroup => {
-                log::warn!("NewTabGroup is a Phase 3 stub; sidebar lands in Phase 4");
+                self.new_tab_group(ctx);
             }
             CloseTabGroup(idx) => {
-                log::warn!(
-                    "CloseTabGroup({idx}) is a Phase 3 stub; sidebar lands in Phase 4"
-                );
+                self.close_tab_group(*idx, ctx);
             }
             RenameTabGroup { index, name } => {
-                log::warn!(
-                    "RenameTabGroup({index}, {name:?}) is a Phase 3 stub; sidebar lands in Phase 4"
-                );
+                self.rename_tab_group(*index, name.clone(), ctx);
             }
             MoveTabGroupLeft(idx) => {
-                log::warn!(
-                    "MoveTabGroupLeft({idx}) is a Phase 3 stub; sidebar lands in Phase 4"
-                );
+                self.move_tab_group(*idx, TabGroupMoveDirection::Left, ctx);
             }
             MoveTabGroupRight(idx) => {
-                log::warn!(
-                    "MoveTabGroupRight({idx}) is a Phase 3 stub; sidebar lands in Phase 4"
-                );
+                self.move_tab_group(*idx, TabGroupMoveDirection::Right, ctx);
             }
             FixSettingsWithOz { error_description } => {
                 use crate::ai::skills::SkillManager;
