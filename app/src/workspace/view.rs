@@ -4936,6 +4936,35 @@ impl Workspace {
         self.tabs.get(index).and_then(|tab| tab.color())
     }
 
+    /// Auto-derive the sidebar color for the tab group at `group_idx`
+    /// from the colors of the tabs it owns. Mirrors cmux's behavior of
+    /// surfacing the same color users already see on the horizontal
+    /// tab bar. Priority: the active tab's color (when that tab
+    /// belongs to this group); otherwise the first tab in the group
+    /// that has any color set.
+    ///
+    /// Tabs whose `tab_group_index` is `None` are treated as belonging
+    /// to group 0 (the SQLite NULL-as-default-group convention used by
+    /// `tab_in_active_group`).
+    pub(crate) fn tab_group_color(&self, group_idx: usize) -> Option<AnsiColorIdentifier> {
+        let belongs_to_group = |tab_group_index: Option<usize>| match tab_group_index {
+            Some(i) => i == group_idx,
+            None => group_idx == 0,
+        };
+
+        if let Some(active_tab) = self.tabs.get(self.active_tab_index) {
+            if belongs_to_group(active_tab.tab_group_index) {
+                if let Some(c) = active_tab.color() {
+                    return Some(c);
+                }
+            }
+        }
+        self.tabs
+            .iter()
+            .filter(|tab| belongs_to_group(tab.tab_group_index))
+            .find_map(|tab| tab.color())
+    }
+
     /// Finds the tab index containing a terminal viewing the given ambient agent conversation,
     /// returning None if the ambient conversation is not open in any tab.
     fn find_tab_with_ambient_agent_conversation(

@@ -16,8 +16,8 @@ use crate::appearance::Appearance;
 use crate::workspace::WorkspaceAction;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    ChildView, Container, CrossAxisAlignment, Element, Empty, Flex, Hoverable, MainAxisSize,
-    MouseStateHandle, Padding, ParentElement, Text,
+    ChildView, ConstrainedBox, Container, CrossAxisAlignment, Element, Empty, Flex, Hoverable,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, Padding, ParentElement, Text,
 };
 use warpui::{AppContext, SingletonEntity};
 
@@ -137,6 +137,7 @@ pub(crate) fn render_tab_group_switcher(
             .finish(),
         );
     } else {
+        let terminal_colors = theme.terminal_colors().normal.clone();
         for (idx, _group) in workspace.tab_groups.iter().enumerate() {
             let is_active = idx == workspace.active_tab_group_index;
             let is_renaming = workspace.tab_group_being_renamed == Some(idx);
@@ -146,13 +147,19 @@ pub(crate) fn render_tab_group_switcher(
                 internal_colors::fg_overlay_1(theme)
             };
 
-            // Body of the row: either the inline rename editor or the
-            // static label.
-            let body: Box<dyn Element> = if is_renaming {
-                ChildView::new(&workspace.tab_group_rename_editor).finish()
+            // Reuse the same per-tab color machinery the horizontal
+            // tab bar already drives -- a workspace inherits the color
+            // of its active tab (or the first colored tab in the
+            // group). Renders as a thin stripe on the leading edge of
+            // the row, matching cmux's visual idiom.
+            let stripe_color = workspace
+                .tab_group_color(idx)
+                .map(|color_id| color_id.to_ansi_color(&terminal_colors).into());
+
+            let label_text = if is_renaming {
+                None
             } else {
-                Text::new_inline(display_label(&workspace.tab_groups, idx), font_family, 12.)
-                    .finish()
+                Some(display_label(&workspace.tab_groups, idx))
             };
 
             // Stable mouse state per row so hover/double-click
@@ -164,9 +171,44 @@ pub(crate) fn render_tab_group_switcher(
                 .or_insert_with(MouseStateHandle::default)
                 .clone();
 
+            // The editor handle lives on Workspace; clone its handle
+            // by reference so the closure can mount it when needed.
+            let editor_handle = workspace.tab_group_rename_editor.clone();
+
             let row_padding_clone = row_padding;
             let mut row = Hoverable::new(mouse_state, move |_state| {
-                Container::new(body)
+                let body: Box<dyn Element> = match label_text.as_ref() {
+                    Some(text) => Text::new_inline(text.clone(), font_family, 12.).finish(),
+                    None => ChildView::new(&editor_handle).finish(),
+                };
+
+                let mut row_flex = Flex::row()
+                    .with_main_axis_alignment(MainAxisAlignment::Start)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center);
+
+                if let Some(color) = stripe_color {
+                    row_flex.add_child(
+                        ConstrainedBox::new(
+                            Container::new(Empty::new().finish())
+                                .with_background_color(color)
+                                .finish(),
+                        )
+                        .with_width(3.)
+                        .with_height(16.)
+                        .finish(),
+                    );
+                    // Tiny gutter between the stripe and the label so
+                    // text doesn't sit flush against the color bar.
+                    row_flex.add_child(
+                        ConstrainedBox::new(Empty::new().finish())
+                            .with_width(8.)
+                            .finish(),
+                    );
+                }
+
+                row_flex.add_child(body);
+
+                Container::new(row_flex.finish())
                     .with_background(bg)
                     .with_padding(row_padding_clone)
                     .finish()
