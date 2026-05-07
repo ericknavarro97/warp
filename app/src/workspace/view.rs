@@ -3631,6 +3631,7 @@ impl Workspace {
                         self.tabs[tab_index].default_directory_color =
                             saved_tab.default_directory_color;
                         self.tabs[tab_index].selected_color = saved_tab.selected_color;
+                        self.tabs[tab_index].tab_group_index = saved_tab.tab_group_index;
 
                         let pane_group = self.tabs[tab_index].pane_group.clone();
 
@@ -4007,6 +4008,7 @@ impl Workspace {
         });
 
         self.tabs.push(TabData::new(new_pane_group));
+        self.assign_active_group_to_last_tab();
         self.activate_tab_internal(self.tab_count() - 1, ctx);
     }
 
@@ -4102,6 +4104,7 @@ impl Workspace {
         });
 
         self.tabs.push(TabData::new(new_pane_group.clone()));
+        self.assign_active_group_to_last_tab();
         let new_tab_index = self.tab_count() - 1;
         self.activate_tab_internal(new_tab_index, ctx);
 
@@ -4956,22 +4959,19 @@ impl Workspace {
 
     /// Remove the tab group at `index`. Tabs that referenced it fall
     /// back to the implicit default group (their `tab_group_index`
-    /// becomes `None`). The active index follows the removed slot --
-    /// closing the active group activates whatever is now at that
-    /// position, clamped to the new end of the list.
+    /// becomes `None`); tabs that pointed at a later group shift their
+    /// index down by one to follow the compaction. The active index
+    /// follows the removed slot, clamped to the new end of the list.
     fn close_tab_group(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
         if index >= self.tab_groups.len() {
             return;
         }
-        // Re-target tabs that pointed at the removed group, and shift
-        // indices for tabs that pointed at a later group down by one.
         for tab in self.tabs.iter_mut() {
-            // `TabData` does not carry a `tab_group_index` field today
-            // -- that lives on the persisted `TabSnapshot`. Subphase B
-            // mirrors it onto `TabData` so the horizontal tab bar can
-            // filter; until then closing a group only adjusts the
-            // surviving group entries below.
-            let _ = tab;
+            tab.tab_group_index = match tab.tab_group_index {
+                Some(i) if i == index => None,
+                Some(i) if i > index => Some(i - 1),
+                other => other,
+            };
         }
         self.tab_groups.remove(index);
         for (i, group) in self.tab_groups.iter_mut().enumerate() {
@@ -4987,6 +4987,48 @@ impl Workspace {
             }
         }
         ctx.notify();
+    }
+
+    /// True when the cmux-style sidebar is enabled for this window
+    /// *and* this window has at least one explicit `tab_groups` entry.
+    /// Legacy windows (empty `tab_groups`) keep the pre-feature
+    /// horizontal-tab-bar behaviour even when the flag is on.
+    pub(crate) fn cmux_sidebar_active(&self) -> bool {
+        FeatureFlag::CmuxStyleWorkspaces.is_enabled() && !self.tab_groups.is_empty()
+    }
+
+    /// Returns the group index a freshly-created tab should inherit.
+    /// `None` means "implicit default group" -- used when the sidebar
+    /// feature is off OR when no explicit `tab_groups` rows exist yet.
+    pub(crate) fn current_tab_group_index_for_new_tab(&self) -> Option<usize> {
+        self.cmux_sidebar_active()
+            .then_some(self.active_tab_group_index)
+    }
+
+    /// Stamps the active tab group index onto the most-recently-pushed
+    /// tab. Cheap to call from every `self.tabs.push(...)` /
+    /// `self.tabs.insert(...)` site.
+    pub(crate) fn assign_active_group_to_last_tab(&mut self) {
+        let group = self.current_tab_group_index_for_new_tab();
+        if let Some(tab) = self.tabs.last_mut() {
+            tab.tab_group_index = group;
+        }
+    }
+
+    /// True when `tab_index` belongs to the currently active tab group.
+    /// Returns `true` for every tab when the sidebar is inactive so the
+    /// existing horizontal tab bar is unchanged for legacy users.
+    pub(crate) fn tab_in_active_group(&self, tab_index: usize) -> bool {
+        if !self.cmux_sidebar_active() {
+            return true;
+        }
+        match self.tabs.get(tab_index).and_then(|t| t.tab_group_index) {
+            // Tabs without an explicit group fall through to the active
+            // group only when the active group is the first one -- this
+            // mirrors the SQLite NULL-as-default-group convention.
+            None => self.active_tab_group_index == 0,
+            Some(idx) => idx == self.active_tab_group_index,
+        }
     }
 
     /// Rename the tab group at `index`. An empty `name` is allowed and
@@ -10059,10 +10101,10 @@ impl Workspace {
                         .unwrap_or_default(),
                     left_panel,
                     right_panel,
-                    // Phase 2 wires up the snapshot field. Phase 3 will surface
-                    // the active group via the `Workspace` view; for now every
-                    // tab still belongs to the implicit default group.
-                    tab_group_index: None,
+                    tab_group_index: self
+                        .tabs
+                        .get(tab_index)
+                        .and_then(|tab| tab.tab_group_index),
                 }
             })
             .filter(|tab| {
@@ -10996,17 +11038,23 @@ impl Workspace {
         match new_tab_placement_setting {
             NewTabPlacement::AfterAllTabs => {
                 self.tabs.push(TabData::new(new_pane_group));
+                self.assign_active_group_to_last_tab();
                 self.activate_tab_internal(self.tab_count() - 1, ctx);
             }
             // Add tab after current tab
             _ => {
                 if self.tab_count() == 0 {
                     self.tabs.push(TabData::new(new_pane_group));
+                    self.assign_active_group_to_last_tab();
                     self.activate_tab_internal(self.tab_count() - 1, ctx);
                 } else {
-                    self.tabs
-                        .insert(self.active_tab_index + 1, TabData::new(new_pane_group));
-                    self.activate_tab_internal(self.active_tab_index + 1, ctx);
+                    let insert_at = self.active_tab_index + 1;
+                    self.tabs.insert(insert_at, TabData::new(new_pane_group));
+                    let group = self.current_tab_group_index_for_new_tab();
+                    if let Some(tab) = self.tabs.get_mut(insert_at) {
+                        tab.tab_group_index = group;
+                    }
+                    self.activate_tab_internal(insert_at, ctx);
                 }
             }
         }
@@ -11070,9 +11118,14 @@ impl Workspace {
 
         if self.tab_count() == 0 {
             self.tabs.push(TabData::new(new_pane_group));
+            self.assign_active_group_to_last_tab();
             self.activate_tab_internal(self.tab_count() - 1, ctx);
         } else {
             self.tabs.insert(new_idx, TabData::new(new_pane_group));
+            let group = self.current_tab_group_index_for_new_tab();
+            if let Some(tab) = self.tabs.get_mut(new_idx) {
+                tab.tab_group_index = group;
+            }
             self.activate_tab_internal(new_idx, ctx);
         }
     }
@@ -11608,6 +11661,7 @@ impl Workspace {
         });
 
         self.tabs.push(TabData::new(new_pane_group.clone()));
+        self.assign_active_group_to_last_tab();
         let new_tab_index = self.tab_count() - 1;
         self.activate_tab_internal(new_tab_index, ctx);
 
@@ -17696,6 +17750,13 @@ impl Workspace {
             let ghost = drag_model.ghost_state_for_window(self.window_id);
 
             for i in 0..self.tabs.len() {
+                // cmux-style sidebar: hide tabs that don't belong to the
+                // active workspace. Legacy windows (empty `tab_groups`)
+                // see no change because `tab_in_active_group` returns
+                // `true` for everything until the user opts in.
+                if !self.tab_in_active_group(i) {
+                    continue;
+                }
                 // Insert ghost slot before tab `i` if the drag would land here.
                 if ghost.as_ref().is_some_and(|g| g.insertion_index == i) {
                     tab_bar.add_child(self.render_ghost_tab_slot(appearance, ctx));
