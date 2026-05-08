@@ -572,7 +572,7 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("Workspace"))
         .with_group(bindings::BindingGroup::Navigation.as_str())
-        .with_key_binding("cmdorctrl-shift-t"),
+        .with_key_binding("cmdorctrl-shift-T"),
         EditableBinding::new(
             "workspace:activate_first_tab_group",
             "Switch to 1st workspace",
@@ -644,7 +644,7 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("Workspace"))
         .with_group(bindings::BindingGroup::Settings.as_str())
-        .with_key_binding("cmdorctrl-shift-r"),
+        .with_key_binding("cmdorctrl-shift-R"),
         EditableBinding::new(
             "workspace:activate_prev_tab",
             "Activate previous tab",
@@ -819,9 +819,14 @@ pub fn init(app: &mut AppContext) {
                 .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Toggle Vertical Tabs Panel"),
             WorkspaceAction::ToggleVerticalTabsPanel,
         )
-        .with_context_predicate(id!("Workspace") & id!(flags::USE_VERTICAL_TABS_FLAG))
+        .with_context_predicate(
+            id!("Workspace")
+                & (id!(flags::USE_VERTICAL_TABS_FLAG) | id!(flags::USE_CMUX_SIDEBAR_FLAG)),
+        )
         .with_group(bindings::BindingGroup::Navigation.as_str())
-        .with_enabled(|| FeatureFlag::VerticalTabs.is_enabled())
+        .with_enabled(|| {
+            FeatureFlag::VerticalTabs.is_enabled() || FeatureFlag::CmuxStyleWorkspaces.is_enabled()
+        })
         .with_key_binding(cmd_or_ctrl_shift("b")),
         EditableBinding::new(
             LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME,

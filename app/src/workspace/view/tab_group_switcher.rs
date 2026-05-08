@@ -13,12 +13,16 @@
 //! `TabGroupRuntimeMetadata` badges) lands in subsequent PRs.
 use crate::app_state::TabGroupSnapshot;
 use crate::appearance::Appearance;
+use crate::workspace::action::TabGroupContextMenuAnchor;
 use crate::workspace::WorkspaceAction;
 use warp_core::ui::theme::color::internal_colors;
+use warp_core::ui::Icon as WarpIcon;
 use warpui::elements::{
-    ChildView, ConstrainedBox, Container, CrossAxisAlignment, Element, Empty, Flex, Hoverable,
-    MainAxisAlignment, MainAxisSize, MouseStateHandle, Padding, ParentElement, Text,
+    ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Element, Empty,
+    Expanded, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, Padding,
+    ParentElement, Radius, Text,
 };
+use warpui::platform::Cursor;
 use warpui::{AppContext, SingletonEntity};
 
 use super::Workspace;
@@ -70,26 +74,6 @@ impl TabGroupSwitcherState {
     }
 }
 
-/// Resolve the entry that should currently appear "selected" in the
-/// sidebar given a snapshot of the window's tab groups and the active
-/// index. Empty `tab_groups` (legacy windows pre-Phase-2 backfill) is
-/// reported as `None` -- the sidebar UI either renders the placeholder
-/// "Workspace 1" row or hides itself entirely in that case.
-pub(crate) fn active_group<'a>(
-    tab_groups: &'a [TabGroupSnapshot],
-    active_index: usize,
-) -> Option<&'a TabGroupSnapshot> {
-    tab_groups.get(active_index)
-}
-
-/// Predicate the renderer uses to decide whether to short-circuit the
-/// whole panel. Phase 4.5 wires this to the feature flag *and* to the
-/// per-window `vertical_tabs_panel_open` toggle so users with the flag
-/// off see no UI delta whatsoever.
-pub(crate) fn should_render_switcher(feature_enabled: bool, panel_open: bool) -> bool {
-    feature_enabled && panel_open
-}
-
 /// Resolves the user-visible label for the group at `index` in
 /// `groups`. Falls back to the auto-generated `Workspace N` form when
 /// the user hasn't named it yet (or has explicitly cleared the name).
@@ -117,8 +101,45 @@ pub(crate) fn render_tab_group_switcher(
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
+    // Sidebar header: "Workspaces" label + a trailing "+" button that
+    // dispatches `NewTabGroup` (same action Cmd+Shift+T fires). The
+    // button is its own Hoverable so the click doesn't bubble up to
+    // any ambient row handlers.
+    let plus_icon_color = theme.sub_text_color(theme.background());
+    let plus_hover_bg = internal_colors::fg_overlay_3(theme);
+    let new_workspace_state = workspace.tab_group_new_button_mouse_state.clone();
+    let new_workspace_button = Hoverable::new(new_workspace_state, move |state| {
+        let mut container = Container::new(
+            ConstrainedBox::new(WarpIcon::Plus.to_warpui_icon(plus_icon_color).finish())
+                .with_width(14.)
+                .with_height(14.)
+                .finish(),
+        )
+        .with_padding(Padding::uniform(3.))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+        if state.is_hovered() {
+            container = container.with_background(plus_hover_bg);
+        }
+        container.finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .on_click(|ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::NewTabGroup);
+    })
+    .finish();
+
+    let header_row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(Expanded::new(
+            1.,
+            Text::new_inline("Workspaces", font_family, 12.).finish(),
+        ).finish())
+        .with_child(new_workspace_button)
+        .finish();
+
     column.add_child(
-        Container::new(Text::new_inline("Workspaces", font_family, 12.).finish())
+        Container::new(header_row)
             .with_padding(header_padding)
             .finish(),
     );
@@ -171,18 +192,36 @@ pub(crate) fn render_tab_group_switcher(
                 .or_insert_with(MouseStateHandle::default)
                 .clone();
 
+            // Stable mouse state for the hover-only close button on
+            // this row. Lazily created -- empty workspaces still get a
+            // handle so the close button renders stably across hover
+            // transitions.
+            let close_state = workspace
+                .tab_group_close_mouse_states
+                .borrow_mut()
+                .entry(idx)
+                .or_insert_with(MouseStateHandle::default)
+                .clone();
+
             // The editor handle lives on Workspace; clone its handle
             // by reference so the closure can mount it when needed.
             let editor_handle = workspace.tab_group_rename_editor.clone();
 
+            // Pre-compute the close-button colors so the inner closure
+            // doesn't need to borrow `theme` (it is `'static + FnMut`).
+            let close_icon_color = theme.sub_text_color(theme.background());
+            let close_hover_bg = internal_colors::fg_overlay_3(theme);
+
             let row_padding_clone = row_padding;
-            let mut row = Hoverable::new(mouse_state, move |_state| {
+            let mut row = Hoverable::new(mouse_state, move |state| {
+                let row_hovered = state.is_hovered();
                 let body: Box<dyn Element> = match label_text.as_ref() {
                     Some(text) => Text::new_inline(text.clone(), font_family, 12.).finish(),
                     None => ChildView::new(&editor_handle).finish(),
                 };
 
                 let mut row_flex = Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
                     .with_main_axis_alignment(MainAxisAlignment::Start)
                     .with_cross_axis_alignment(CrossAxisAlignment::Center);
 
@@ -206,7 +245,32 @@ pub(crate) fn render_tab_group_switcher(
                     );
                 }
 
-                row_flex.add_child(body);
+                row_flex.add_child(Expanded::new(1., body).finish());
+
+                if row_hovered && !is_renaming {
+                    let close_button = Hoverable::new(close_state.clone(), move |btn_state| {
+                        let mut container = Container::new(
+                            ConstrainedBox::new(
+                                WarpIcon::X.to_warpui_icon(close_icon_color).finish(),
+                            )
+                            .with_width(12.)
+                            .with_height(12.)
+                            .finish(),
+                        )
+                        .with_padding(Padding::uniform(3.))
+                        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+                        if btn_state.is_hovered() {
+                            container = container.with_background(close_hover_bg);
+                        }
+                        container.finish()
+                    })
+                    .with_cursor(Cursor::PointingHand)
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(WorkspaceAction::CloseTabGroup(idx));
+                    })
+                    .finish();
+                    row_flex.add_child(close_button);
+                }
 
                 Container::new(row_flex.finish())
                     .with_background(bg)
@@ -214,95 +278,42 @@ pub(crate) fn render_tab_group_switcher(
                     .finish()
             });
             // While the editor is mounted in the row, suppress the
-            // double-click handler so clicks inside the editor don't
-            // re-trigger the rename flow.
+            // click and double-click handlers so clicks inside the
+            // editor don't re-trigger activation or the rename flow.
             if !is_renaming {
-                row = row.on_double_click(move |ctx, _, _| {
-                    ctx.dispatch_typed_action(WorkspaceAction::BeginRenameTabGroup(idx));
-                });
+                row = row
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(WorkspaceAction::ActivateTabGroup(idx));
+                    })
+                    .on_double_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(WorkspaceAction::BeginRenameTabGroup(idx));
+                    })
+                    .on_right_click(move |ctx, _, position| {
+                        ctx.dispatch_typed_action(
+                            WorkspaceAction::ToggleTabGroupRightClickMenu {
+                                index: idx,
+                                anchor: TabGroupContextMenuAnchor::Pointer(position),
+                            },
+                        );
+                    });
             }
             column.add_child(row.finish());
         }
     }
 
-    Container::new(column.finish())
+    let panel = Container::new(column.finish())
         .with_background(internal_colors::fg_overlay_1(theme))
         .with_padding(Padding::uniform(0.))
+        .finish();
+
+    ConstrainedBox::new(panel)
+        .with_width(workspace.tab_group_switcher_state.effective_width())
         .finish()
-}
-
-#[allow(dead_code)]
-fn _unused_empty_placeholder() -> Box<dyn Element> {
-    Empty::new().finish()
-}
-
-/// Live, per-group sidebar metadata (Phase 5). Deliberately *not* part
-/// of [`crate::app_state::TabGroupSnapshot`]: every field is recomputed
-/// at runtime from the focused session's cwd / `gh` cache / port
-/// listener, so persisting it to SQLite would only let stale data
-/// flicker on relaunch.
-///
-/// Phase 5.5 will plug in the actual fetchers (lesson learned from the
-/// upstream cmux #2746 incident: cache PR lookups aggressively to avoid
-/// hammering the GitHub API) -- this struct is the contract those
-/// fetchers populate against.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TabGroupRuntimeMetadata {
-    /// Git branch of the focused session's working directory, when the
-    /// directory is a git worktree. `None` for non-repo workspaces.
-    pub git_branch: Option<String>,
-    /// Number of the GitHub pull request linked to `git_branch`.
-    pub pr_number: Option<i32>,
-    /// Ports the workspace's sessions are currently listening on. Empty
-    /// for workspaces without active processes.
-    pub listening_ports: Vec<u16>,
-    /// Number of unseen agent / OSC-99 / OSC-777 notifications -- drives
-    /// the badge ring around the sidebar entry.
-    pub pending_notifications: u32,
-}
-
-impl TabGroupRuntimeMetadata {
-    /// True when the renderer should draw the notification ring for
-    /// this group. Centralizes the rule so Phase 5.5 fetchers and the
-    /// sidebar UI agree on the threshold.
-    pub(crate) fn has_pending_notifications(&self) -> bool {
-        self.pending_notifications > 0
-    }
-
-    /// Convenience accessor used by the sidebar to short-circuit when
-    /// nothing live is worth showing for the group.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.git_branch.is_none()
-            && self.pr_number.is_none()
-            && self.listening_ports.is_empty()
-            && self.pending_notifications == 0
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn group(name: &str, position: i32, is_active: bool) -> TabGroupSnapshot {
-        TabGroupSnapshot {
-            name: name.into(),
-            color: None,
-            position,
-            is_active,
-        }
-    }
-
-    #[test]
-    fn active_group_returns_indexed_entry() {
-        let groups = vec![group("a", 0, false), group("b", 1, true), group("c", 2, false)];
-        assert_eq!(active_group(&groups, 1).map(|g| g.name.as_str()), Some("b"));
-    }
-
-    #[test]
-    fn active_group_handles_legacy_empty_window() {
-        let groups: Vec<TabGroupSnapshot> = Vec::new();
-        assert!(active_group(&groups, 0).is_none());
-    }
 
     #[test]
     fn switcher_state_default_width_matches_cmux() {
@@ -311,39 +322,5 @@ mod tests {
             state.effective_width(),
             TabGroupSwitcherState::DEFAULT_WIDTH_PX
         );
-    }
-
-    #[test]
-    fn switcher_hidden_when_feature_off() {
-        assert!(!should_render_switcher(false, true));
-        assert!(!should_render_switcher(true, false));
-        assert!(should_render_switcher(true, true));
-    }
-
-    #[test]
-    fn runtime_metadata_default_is_empty() {
-        let meta = TabGroupRuntimeMetadata::default();
-        assert!(meta.is_empty());
-        assert!(!meta.has_pending_notifications());
-    }
-
-    #[test]
-    fn runtime_metadata_reports_pending_notifications() {
-        let meta = TabGroupRuntimeMetadata {
-            pending_notifications: 3,
-            ..TabGroupRuntimeMetadata::default()
-        };
-        assert!(meta.has_pending_notifications());
-        assert!(!meta.is_empty());
-    }
-
-    #[test]
-    fn runtime_metadata_is_not_empty_when_branch_known() {
-        let meta = TabGroupRuntimeMetadata {
-            git_branch: Some("main".into()),
-            ..TabGroupRuntimeMetadata::default()
-        };
-        assert!(!meta.is_empty());
-        assert!(!meta.has_pending_notifications());
     }
 }

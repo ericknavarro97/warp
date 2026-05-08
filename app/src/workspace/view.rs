@@ -107,6 +107,7 @@ use crate::terminal::view::{
     AgentOnboardingVersion, ConversationRestorationInNewPaneType, OnboardingIntention,
     OnboardingVersion,
 };
+use crate::ui_components::color_dot::{render_color_dot, TAB_COLOR_OPTIONS};
 use crate::ui_components::red_notification_dot::RedNotificationDot;
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::settings::OpenConversationPreference;
@@ -434,7 +435,7 @@ use crate::editor::{
 use crate::persistence::ModelEvent;
 
 use super::action::{
-    InitContent, RestoreConversationLayout, TabContextMenuAnchor,
+    InitContent, RestoreConversationLayout, TabContextMenuAnchor, TabGroupContextMenuAnchor,
     VerticalTabsPaneContextMenuTarget, WorkspaceAction,
 };
 use super::close_session_confirmation_dialog::{
@@ -788,6 +789,7 @@ type RemoteUploadId = (TerminalPaneId, FileUploadId);
 type WorkspaceMenuHandles = (
     ViewHandle<Menu<WorkspaceAction>>,
     ViewHandle<Menu<WorkspaceAction>>,
+    ViewHandle<Menu<WorkspaceAction>>,
     ViewHandle<Menu<NewSessionSidecarSelection>>,
 );
 
@@ -950,6 +952,22 @@ pub struct Workspace {
     /// out-of-band bookkeeping.
     pub(crate) tab_group_row_mouse_states:
         std::cell::RefCell<std::collections::HashMap<usize, MouseStateHandle>>,
+    /// Per-row close-button mouse state handles, keyed by group index.
+    /// Lazily created the first time a row renders its hover-only close
+    /// button (Team B of cmux-style workspaces).
+    pub(crate) tab_group_close_mouse_states:
+        std::cell::RefCell<std::collections::HashMap<usize, MouseStateHandle>>,
+    /// Mouse state for the "+" button rendered next to the
+    /// "Workspaces" sidebar header. Stable across renders so the
+    /// hover background doesn't flicker.
+    pub(crate) tab_group_new_button_mouse_state: MouseStateHandle,
+    /// Floating right-click popover for cmux-style workspace rows.
+    /// Mirrors the existing `tab_right_click_menu` infrastructure so
+    /// the sidebar gets the same dismiss / positioning behavior.
+    tab_group_right_click_menu: ViewHandle<Menu<WorkspaceAction>>,
+    /// `(workspace_index, anchor)` of the currently-open workspace
+    /// right-click popover. `None` when no menu is showing.
+    pub(crate) show_tab_group_right_click_menu: Option<(usize, TabGroupContextMenuAnchor)>,
     pub(crate) hovered_tab_index: Option<TabBarHoverIndex>,
     tab_bar_hover_state: MouseStateHandle,
     tab_fixed_width: Option<f32>,
@@ -1067,6 +1085,11 @@ pub struct Workspace {
     ai_fact_view: ViewHandle<AIFactView>,
     left_panel_open: bool,
     vertical_tabs_panel_open: bool,
+    /// Open/close state of the cmux-style workspaces sidebar. Independent
+    /// of `vertical_tabs_panel_open` so cmux users don't share storage
+    /// with the legacy paradigm. Persisted in the `cmux_sidebar_open`
+    /// column of the `windows` table.
+    pub(crate) cmux_sidebar_open: bool,
     vertical_tabs_panel: VerticalTabsPanelState,
     left_panel_view: ViewHandle<LeftPanelView>,
     left_panel_views: Vec<ToolPanelView>,
@@ -1381,7 +1404,17 @@ impl Workspace {
             self.tab_groups[index].name.clone()
         };
         self.tab_group_being_renamed = Some(index);
+        // Starting a rename always dismisses any open right-click menu
+        // -- the editor takes over the row and the popover would
+        // visually collide with it.
+        self.show_tab_group_right_click_menu = None;
+        // Clear any leftover content from a previous rename pass --
+        // `insert_selected_text` appends rather than replaces, so
+        // without this the editor accumulates "Workspace 2Workspace 2"
+        // across successive rename starts. Mirrors `rename_tab_internal`
+        // (`clear_tab_name_editor` at line 5555).
         self.tab_group_rename_editor.update(ctx, move |editor, ctx| {
+            editor.clear_buffer_and_reset_undo_stack(ctx);
             editor.insert_selected_text(&initial_text, ctx);
         });
         ctx.focus(&self.tab_group_rename_editor);
@@ -1894,6 +1927,11 @@ impl Workspace {
             me.handle_tab_right_click_menu_event(event, ctx);
         });
 
+        let tab_group_right_click_menu = ctx.add_typed_action_view(|_| Menu::new());
+        ctx.subscribe_to_view(&tab_group_right_click_menu, move |me, _, event, ctx| {
+            me.handle_tab_group_right_click_menu_event(event, ctx);
+        });
+
         // Currently setting the width to 300 px as a middle ground that looks
         // ok when the shells show the path to the executables, and when they
         // don't. Going forward we may want to enhance the menu to allow for a
@@ -1932,7 +1970,12 @@ impl Workspace {
             me.handle_new_session_sidecar_event(event, ctx);
         });
 
-        (tab_right_click_menu, new_session_menu, new_session_sidecar)
+        (
+            tab_right_click_menu,
+            tab_group_right_click_menu,
+            new_session_menu,
+            new_session_sidecar,
+        )
     }
 
     fn build_launch_config_save_modal(
@@ -2695,8 +2738,12 @@ impl Workspace {
         terminal::platform::init().expect("Terminal platform initialized");
 
         let tab_bar_overflow_menu = Self::build_tab_bar_overflow_menu(ctx);
-        let (tab_right_click_menu, new_session_dropdown_menu, new_session_sidecar_menu) =
-            Self::build_menus(ctx);
+        let (
+            tab_right_click_menu,
+            tab_group_right_click_menu,
+            new_session_dropdown_menu,
+            new_session_sidecar_menu,
+        ) = Self::build_menus(ctx);
 
         // Subscribe to network changes
         ctx.subscribe_to_model(
@@ -3193,6 +3240,8 @@ impl Workspace {
             tab_group_rename_editor: Self::tab_group_rename_editor(ctx),
             tab_group_being_renamed: None,
             tab_group_row_mouse_states: Default::default(),
+            tab_group_close_mouse_states: Default::default(),
+            tab_group_new_button_mouse_state: MouseStateHandle::default(),
             pane_rename_editor: Self::pane_rename_editor(ctx),
             vertical_tabs_search_input: Self::vertical_tabs_search_input(ctx),
             tips_completed,
@@ -3204,6 +3253,8 @@ impl Workspace {
             show_tab_bar_overflow_menu: false,
             tab_right_click_menu,
             show_tab_right_click_menu: None,
+            tab_group_right_click_menu,
+            show_tab_group_right_click_menu: None,
             new_session_dropdown_menu,
             show_new_session_dropdown_menu: None,
             changelog_model,
@@ -3270,6 +3321,7 @@ impl Workspace {
             ai_fact_view,
             left_panel_open: false,
             vertical_tabs_panel_open: false,
+            cmux_sidebar_open: Self::initial_cmux_sidebar_open(&workspace_setting),
             vertical_tabs_panel: Default::default(),
             left_panel_view,
             left_panel_views,
@@ -3931,6 +3983,22 @@ impl Workspace {
                 // the tabs panel closed even though native windows still expose workspace chrome.
                 false
             }
+        }
+    }
+
+    /// Initial open/close state for the cmux-style workspaces sidebar.
+    /// Restored verbatim from `WindowSnapshot` for windows brought back
+    /// from a previous session; for fresh windows we default to `true`
+    /// when the feature flag is on so users land on a visible sidebar
+    /// (matches cmux native UX). Harmless when the feature is off
+    /// because every render path that consumes this field is gated by
+    /// `cmux_sidebar_active()`.
+    fn initial_cmux_sidebar_open(workspace_setting: &NewWorkspaceSource) -> bool {
+        match workspace_setting {
+            NewWorkspaceSource::Restored {
+                window_snapshot, ..
+            } => window_snapshot.cmux_sidebar_open,
+            _ => FeatureFlag::CmuxStyleWorkspaces.is_enabled(),
         }
     }
 
@@ -4947,6 +5015,17 @@ impl Workspace {
     /// to group 0 (the SQLite NULL-as-default-group convention used by
     /// `tab_in_active_group`).
     pub(crate) fn tab_group_color(&self, group_idx: usize) -> Option<AnsiColorIdentifier> {
+        // Prefer the user-set explicit color override (Team C of cmux
+        // workspaces) over the inherited-from-tabs fallback. Stored on
+        // disk as a serde-encoded string in `tab_groups.color`.
+        if let Some(group) = self.tab_groups.get(group_idx) {
+            if let Some(raw) = group.color.as_deref() {
+                if let Ok(parsed) = serde_yaml::from_str::<AnsiColorIdentifier>(raw) {
+                    return Some(parsed);
+                }
+            }
+        }
+
         let belongs_to_group = |tab_group_index: Option<usize>| match tab_group_index {
             Some(i) => i == group_idx,
             None => group_idx == 0,
@@ -4963,6 +5042,28 @@ impl Workspace {
             .iter()
             .filter(|tab| belongs_to_group(tab.tab_group_index))
             .find_map(|tab| tab.color())
+    }
+
+    /// Stores an explicit color override for the workspace at
+    /// `group_idx`. `None` clears the override and restores the
+    /// inherited-from-tabs color. The new value is mirrored onto the
+    /// in-memory `TabGroupSnapshot` and gets persisted on the next
+    /// `save_app_state` cycle alongside the rest of the snapshot.
+    pub(crate) fn set_tab_group_color(
+        &mut self,
+        group_idx: usize,
+        color: Option<AnsiColorIdentifier>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(group) = self.tab_groups.get_mut(group_idx) else {
+            return;
+        };
+        group.color = color
+            .map(|c| serde_yaml::to_string(&c).unwrap_or_default().trim().to_string())
+            .filter(|s| !s.is_empty());
+        // Selecting a color also dismisses the right-click popover.
+        self.show_tab_group_right_click_menu = None;
+        ctx.notify();
     }
 
     /// Finds the tab index containing a terminal viewing the given ambient agent conversation,
@@ -5052,13 +5153,45 @@ impl Workspace {
             group.is_active = i == index;
         }
         self.active_tab_group_index = index;
+        // Reseat active_tab_index onto a tab that belongs to the newly
+        // activated group so the right pane and the (filtered) tab bar
+        // stay consistent. If the group is empty we open a default tab
+        // for it -- otherwise the right pane would render stale content
+        // from a tab that lives in a different workspace.
+        let belongs_to_new_group = |tab: &TabData| match tab.tab_group_index {
+            Some(i) => i == index,
+            None => index == 0,
+        };
+        let already_in_group = self
+            .tabs
+            .get(self.active_tab_index)
+            .is_some_and(belongs_to_new_group);
+        if !already_in_group {
+            if let Some(first_in_group) =
+                self.tabs.iter().position(belongs_to_new_group)
+            {
+                self.activate_tab_internal(first_in_group, ctx);
+                return;
+            }
+            // Empty workspace -- spawn a default tab so the user lands
+            // on a usable terminal instead of an empty pane. Tab
+            // routing keys off `active_tab_group_index` (already set
+            // above), so the new tab lands inside this workspace.
+            ctx.notify();
+            ctx.dispatch_typed_action(&WorkspaceAction::AddDefaultTab);
+            return;
+        }
         ctx.notify();
     }
 
-    /// Append a fresh tab group named `Workspace N` and make it active.
-    /// Existing tabs stay in their current group; the new group starts
-    /// empty and the user populates it via the next session/tab they
-    /// create (tab routing into the active group is wired in Subphase B).
+    /// Append a fresh tab group named `Workspace N`, make it active,
+    /// and open a default tab inside it so the right pane shows a
+    /// terminal immediately (otherwise the user lands on an empty
+    /// pane and has to press Cmd+T separately).
+    ///
+    /// Tab routing keys off `active_tab_group_index` (see
+    /// `current_tab_group_index_for_new_tab`), so the dispatched
+    /// `AddDefaultTab` lands in the workspace we just created.
     fn new_tab_group(&mut self, ctx: &mut ViewContext<Self>) {
         let new_index = self.tab_groups.len();
         let position = self
@@ -5079,17 +5212,81 @@ impl Workspace {
         });
         self.active_tab_group_index = new_index;
         ctx.notify();
+        ctx.dispatch_typed_action(&WorkspaceAction::AddDefaultTab);
     }
 
-    /// Remove the tab group at `index`. Tabs that referenced it fall
-    /// back to the implicit default group (their `tab_group_index`
-    /// becomes `None`); tabs that pointed at a later group shift their
-    /// index down by one to follow the compaction. The active index
-    /// follows the removed slot, clamped to the new end of the list.
+    /// Close the tab group at `index` along with every tab that
+    /// belongs to it. Tabs that pointed at a later group shift their
+    /// `tab_group_index` down by one to follow the compaction. When
+    /// the group being closed is the only one in the window, the
+    /// whole window is closed instead (no tabs left to keep the
+    /// window meaningful).
+    ///
+    /// Member tabs include both `Some(index)` and any orphan tabs
+    /// (`None`) when `index == 0`, mirroring the
+    /// `tab_in_active_group` "NULL maps to group 0" convention so
+    /// legacy data gets cleaned up when Workspace 1 is deleted.
+    ///
+    /// TODO(cmux): per-tab close confirmation for long-running
+    /// processes is currently bypassed (`skip_confirmation = true`)
+    /// because keeping it synchronous with the tab_groups compaction
+    /// below requires a custom modal flow. The existing close-session
+    /// dialog re-dispatch path (close_session_confirmation_dialog.rs)
+    /// only re-calls `close_tabs`, so it would close the member tabs
+    /// but skip the compaction here, leaving an orphaned group entry.
+    /// Add a workspace-level confirmation modal in a follow-up.
     fn close_tab_group(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
         if index >= self.tab_groups.len() {
             return;
         }
+
+        // If this is the only workspace, the user is effectively
+        // asking to close the window. Defer to `CloseWindow` rather
+        // than leave the window with zero tabs (the close-tab path
+        // has a last-tab guard that would otherwise abort midway).
+        if self.tab_groups.len() == 1 {
+            ctx.dispatch_typed_action(&WorkspaceAction::CloseWindow);
+            return;
+        }
+
+        // Collect indices of member tabs. Orphan tabs (None) count as
+        // belonging to group 0 so deleting Workspace 1 cleans up
+        // pre-feature legacy data.
+        let member_indices: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tab)| {
+                let belongs = match tab.tab_group_index {
+                    Some(g) => g == index,
+                    None => index == 0,
+                };
+                belongs.then_some(i)
+            })
+            .collect();
+
+        // Close member tabs through the existing batch primitive --
+        // it handles index invalidation by closing in descending
+        // order. `skip_confirmation = true` keeps this call
+        // synchronous so the compaction below sees a consistent
+        // state (see TODO above).
+        if !member_indices.is_empty() {
+            self.close_tabs(
+                member_indices.into_iter(),
+                OpenDialogSource::CloseTabGroup {
+                    tab_group_index: index,
+                },
+                true,
+                true,
+                ctx,
+            );
+        }
+
+        // Decrement `tab_group_index` of the surviving tabs that
+        // referenced a later group. Tabs in the deleted group are
+        // already gone via `close_tabs` above, so the `Some(i) if i
+        // == index` arm should be unreachable -- keep it as a
+        // defensive no-op in case `close_tabs` changes semantics.
         for tab in self.tabs.iter_mut() {
             tab.tab_group_index = match tab.tab_group_index {
                 Some(i) if i == index => None,
@@ -5110,6 +5307,19 @@ impl Workspace {
                 group.is_active = i == self.active_tab_group_index;
             }
         }
+        // Drop the per-row mouse state caches for any group whose
+        // `usize` index is now out of range so we don't leak handles
+        // and so a recreated group with the same index starts fresh.
+        let len = self.tab_groups.len();
+        self.tab_group_row_mouse_states
+            .borrow_mut()
+            .retain(|i, _| *i < len);
+        self.tab_group_close_mouse_states
+            .borrow_mut()
+            .retain(|i, _| *i < len);
+        // Closing the workspace dismisses any open right-click popover
+        // (the row that owned it is gone or has been re-indexed).
+        self.show_tab_group_right_click_menu = None;
         ctx.notify();
     }
 
@@ -6873,6 +7083,122 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Open / close the right-click popover for the cmux-style
+    /// workspace at `index`. Mirrors `toggle_tab_right_click_menu`
+    /// for tabs -- builds menu items lazily via `tab_group_menu_items`,
+    /// stashes the anchor on the workspace, and focuses the menu so
+    /// keyboard navigation works.
+    pub fn toggle_tab_group_right_click_menu(
+        &mut self,
+        index: usize,
+        anchor: TabGroupContextMenuAnchor,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.show_tab_group_right_click_menu.is_some() {
+            self.show_tab_group_right_click_menu = None;
+            ctx.notify();
+            return;
+        }
+        if index >= self.tab_groups.len() {
+            return;
+        }
+
+        let menu_items = self.tab_group_menu_items(index, ctx);
+        ctx.update_view(&self.tab_group_right_click_menu, |menu, view_ctx| {
+            menu.set_items(menu_items, view_ctx);
+        });
+        self.show_tab_group_right_click_menu = Some((index, anchor));
+        ctx.focus(&self.tab_group_right_click_menu);
+        ctx.notify();
+    }
+
+    /// Build the items shown in the workspace right-click popover:
+    /// Rename / Delete / separator / a custom-label color swatch row.
+    /// The swatch row is structurally identical to the per-tab color
+    /// picker (`Tab::dot_color_option_menu_items`) so visuals match
+    /// the existing tab right-click menu.
+    fn tab_group_menu_items(
+        &self,
+        index: usize,
+        ctx: &AppContext,
+    ) -> Vec<MenuItem<WorkspaceAction>> {
+        let appearance = Appearance::as_ref(ctx);
+        let theme = appearance.theme();
+        let terminal_colors = theme.terminal_colors().normal.clone();
+        let effective_color = self.tab_group_color(index);
+
+        let mut items: Vec<MenuItem<WorkspaceAction>> = vec![
+            MenuItem::Item(
+                MenuItemFields::new("Rename")
+                    .with_on_select_action(WorkspaceAction::BeginRenameTabGroup(index)),
+            ),
+            MenuItem::Item(
+                MenuItemFields::new("Delete")
+                    .with_on_select_action(WorkspaceAction::CloseTabGroup(index)),
+            ),
+            MenuItem::Separator,
+        ];
+
+        let mouse_states: Vec<MouseStateHandle> = (0..TAB_COLOR_OPTIONS.len() + 1)
+            .map(|_| MouseStateHandle::default())
+            .collect();
+
+        items.push(MenuItem::Item(
+            MenuItemFields::new_with_custom_label(
+                Arc::new(move |_is_selected, _is_hovered, appearance, _app| {
+                    let theme = appearance.theme();
+                    let ring_color: ColorU = theme.accent().into();
+
+                    let mut row = Flex::row()
+                        .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_main_axis_size(MainAxisSize::Max);
+
+                    for (ansi_id, mouse_state) in std::iter::once(None)
+                        .chain(TAB_COLOR_OPTIONS.iter().copied().map(Some))
+                        .zip(mouse_states.iter().cloned())
+                    {
+                        let is_selected = match ansi_id {
+                            None => effective_color.is_none(),
+                            Some(id) => effective_color == Some(id),
+                        };
+                        let dot_color: ColorU = match ansi_id {
+                            None => ColorU::transparent_black(),
+                            Some(id) => id.to_ansi_color(&terminal_colors).into(),
+                        };
+                        let tooltip = match ansi_id {
+                            None => "Default (no color)".to_string(),
+                            Some(id) => id.to_string(),
+                        };
+                        let dot = render_color_dot(
+                            mouse_state,
+                            dot_color,
+                            is_selected,
+                            ring_color,
+                            ansi_id.is_none(),
+                            theme.foreground(),
+                            tooltip,
+                            appearance,
+                        )
+                        .on_click(move |ctx, _, _| {
+                            ctx.dispatch_typed_action(WorkspaceAction::SetTabGroupColor(
+                                index, ansi_id,
+                            ));
+                            ctx.dispatch_typed_action(crate::menu::MenuAction::Close(true));
+                        });
+                        row.add_child(dot.finish());
+                    }
+                    row.finish()
+                }),
+                None,
+            )
+            .no_highlight_on_hover()
+            .with_no_interaction_on_hover(),
+        ));
+
+        items
+    }
+
     pub fn toggle_vertical_tabs_pane_context_menu(
         &mut self,
         tab_index: usize,
@@ -8242,6 +8568,19 @@ impl Workspace {
     }
 
     fn toggle_vertical_tabs_panel(&mut self, ctx: &mut ViewContext<Self>) {
+        // When the cmux-style workspaces sidebar is the active left
+        // panel for this window, route this action onto its dedicated
+        // `cmux_sidebar_open` field so toggling doesn't bleed state
+        // into the legacy vertical-tabs paradigm. Also dismiss any
+        // open right-click popover -- the row it was anchored to
+        // disappears when we close the sidebar.
+        if self.cmux_sidebar_active() {
+            self.cmux_sidebar_open = !self.cmux_sidebar_open;
+            self.show_tab_group_right_click_menu = None;
+            self.sync_window_button_visibility(ctx);
+            ctx.notify();
+            return;
+        }
         self.vertical_tabs_panel_open = !self.vertical_tabs_panel_open;
         if !self.vertical_tabs_panel_open {
             self.close_vertical_tabs_settings_popup();
@@ -8865,6 +9204,17 @@ impl Workspace {
     ) {
         if let MenuEvent::Close { via_select_item: _ } = event {
             self.show_tab_right_click_menu = None;
+            ctx.notify();
+        }
+    }
+
+    fn handle_tab_group_right_click_menu_event(
+        &mut self,
+        event: &MenuEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let MenuEvent::Close { via_select_item: _ } = event {
+            self.show_tab_group_right_click_menu = None;
             ctx.notify();
         }
     }
@@ -10031,6 +10381,14 @@ impl Workspace {
                     OpenDialogSource::CloseOtherTabs { tab_index } => {
                         self.close_other_tabs(tab_index, true, ctx);
                     }
+                    OpenDialogSource::CloseTabGroup { tab_group_index } => {
+                        // Currently unreachable -- close_tab_group
+                        // calls close_tabs with skip_confirmation=true
+                        // so the dialog never gets shown. Kept as a
+                        // safe no-op to keep the match exhaustive in
+                        // case we later add a workspace-level dialog.
+                        self.close_tab_group(tab_group_index, ctx);
+                    }
                 }
                 self.current_workspace_state
                     .is_close_session_confirmation_dialog_open = false;
@@ -10336,6 +10694,7 @@ impl Workspace {
             warp_drive_index_width,
             left_panel_open: self.left_panel_open,
             vertical_tabs_panel_open: self.vertical_tabs_panel_open,
+            cmux_sidebar_open: self.cmux_sidebar_open,
             left_panel_width,
             right_panel_width,
             agent_management_filters,
@@ -17317,7 +17676,22 @@ impl Workspace {
             FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs;
 
         let (is_active, tooltip_text, action, keybinding_name, save_position_id) =
-            if vertical_tabs_active {
+            if self.cmux_sidebar_active() {
+                // cmux-style sidebar wins over both the legacy
+                // vertical-tabs branch and the left-tools branch.
+                // Reuses the existing `ToggleVerticalTabsPanel`
+                // action -- the handler routes onto `cmux_sidebar_open`
+                // when this branch is live, so the same keybinding
+                // (Cmd+Shift+B) and registered binding name keep
+                // working without a keymap migration.
+                (
+                    self.cmux_sidebar_open,
+                    "Workspaces",
+                    WorkspaceAction::ToggleVerticalTabsPanel,
+                    "workspace:toggle_vertical_tabs_panel",
+                    "workspace:toggle_vertical_tabs_panel",
+                )
+            } else if vertical_tabs_active {
                 (
                     self.vertical_tabs_panel_open,
                     "Tabs panel",
@@ -17782,9 +18156,14 @@ impl Workspace {
                 .finish();
         }
 
-        // Check if vertical tabs mode is active
-        let vertical_tabs_active =
-            FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs;
+        // Check if vertical tabs mode is active. When the cmux-style
+        // sidebar is on, the workspace switcher takes over the vertical
+        // tabs slot and the horizontal tab bar (now scoped to the active
+        // workspace) is the only place tabs render -- so override
+        // vertical-tabs mode to keep tabs visible in the title bar.
+        let vertical_tabs_active = !self.cmux_sidebar_active()
+            && FeatureFlag::VerticalTabs.is_enabled()
+            && *TabSettings::as_ref(ctx).use_vertical_tabs;
 
         // Render config-driven left-side toolbar buttons (both horizontal and vertical tabs)
         let knowledge_center_closed = true;
@@ -19721,13 +20100,17 @@ impl Workspace {
         }
         match item {
             HeaderToolbarItemKind::TabsPanel => {
-                if !self.vertical_tabs_panel_open {
+                // Each paradigm reads its own open/close state so the
+                // cmux sidebar's visibility is independent of the legacy
+                // vertical-tabs panel.
+                let panel_open = if self.cmux_sidebar_active() {
+                    self.cmux_sidebar_open
+                } else {
+                    self.vertical_tabs_panel_open
+                };
+                if !panel_open {
                     return None;
                 }
-                // cmux-style sidebar takes over the vertical-tabs slot
-                // when the feature is on for this window. Legacy
-                // windows (empty `tab_groups`) keep the existing
-                // vertical_tabs panel.
                 let panel = if self.cmux_sidebar_active() {
                     tab_group_switcher::render_tab_group_switcher(self, app)
                 } else {
@@ -20019,6 +20402,9 @@ impl Workspace {
         }
         if *tab_settings.use_vertical_tabs.value() {
             context.set.insert(flags::USE_VERTICAL_TABS_FLAG);
+        }
+        if FeatureFlag::CmuxStyleWorkspaces.is_enabled() {
+            context.set.insert(flags::USE_CMUX_SIDEBAR_FLAG);
         }
         if self.should_show_session_config_tab_config_chip() {
             context
@@ -20767,6 +21153,12 @@ impl TypedActionView for Workspace {
             }
             MoveTabGroupRight(idx) => {
                 self.move_tab_group(*idx, TabGroupMoveDirection::Right, ctx);
+            }
+            ToggleTabGroupRightClickMenu { index, anchor } => {
+                self.toggle_tab_group_right_click_menu(*index, *anchor, ctx);
+            }
+            SetTabGroupColor(idx, color) => {
+                self.set_tab_group_color(*idx, *color, ctx);
             }
             FixSettingsWithOz { error_description } => {
                 use crate::ai::skills::SkillManager;
@@ -23034,6 +23426,26 @@ impl View for Workspace {
                     );
                 }
             }
+        }
+
+        // cmux-style workspace right-click popover. Anchored to the
+        // pointer position captured when the user right-clicks a row
+        // in the cmux sidebar -- mirrors the horizontal-tab popover
+        // path above (uses `WindowByPosition` so the menu stays
+        // on-screen if the click was near the bottom-right edge).
+        if let Some((_idx, TabGroupContextMenuAnchor::Pointer(position))) =
+            self.show_tab_group_right_click_menu
+        {
+            let positioning = OffsetPositioning::offset_from_parent(
+                position,
+                ParentOffsetBounds::WindowByPosition,
+                ParentAnchor::TopLeft,
+                ChildAnchor::TopLeft,
+            );
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.tab_group_right_click_menu).finish(),
+                positioning,
+            );
         }
 
         // Render the new session dropdown menu. This is outside the tab bar visibility

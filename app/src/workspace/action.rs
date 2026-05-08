@@ -82,6 +82,11 @@ pub enum TabContextMenuAnchor {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum TabGroupContextMenuAnchor {
+    Pointer(Vector2F),
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum VerticalTabsPaneContextMenuTarget {
     ClickedPane(PaneViewLocator),
     ActivePane(PaneViewLocator),
@@ -714,6 +719,20 @@ pub enum WorkspaceAction {
     /// Reorders the tab group at `index` one slot to the right in the
     /// sidebar. No-op when the group is already last.
     MoveTabGroupRight(usize),
+    /// Toggles the floating right-click menu popover for the workspace
+    /// at `index`. The menu surfaces Rename / Color / Delete actions
+    /// and is dismissed by re-dispatching this action with the same
+    /// index (or by clicking outside / selecting any of its options).
+    /// Mirrors `ToggleTabRightClickMenu` for the cmux-style sidebar.
+    ToggleTabGroupRightClickMenu {
+        index: usize,
+        anchor: TabGroupContextMenuAnchor,
+    },
+    /// Sets the explicit color override for the workspace at `index`.
+    /// `None` clears the override and restores the inherited-from-tabs
+    /// color. The new value is mirrored onto `tab_groups.color` and
+    /// persisted on the next `save_app_state` cycle.
+    SetTabGroupColor(usize, Option<AnsiColorIdentifier>),
 }
 
 impl From<&WorkspaceAction> for LoginGatedFeature {
@@ -761,6 +780,7 @@ impl WorkspaceAction {
             | NewTabGroup
             | CloseTabGroup(_)
             | RenameTabGroup { .. }
+            | SetTabGroupColor(..)
             | MoveTabGroupLeft(_)
             | MoveTabGroupRight(_)
             | ActivatePrevTab
@@ -845,6 +865,7 @@ impl WorkspaceAction {
             | ToggleErrorUnderlining
             | ToggleSyntaxHighlighting
             | OpenLaunchConfigSaveModal
+            | ToggleTabGroupRightClickMenu { .. }
             | ToggleTabRightClickMenu { .. }
             | ToggleVerticalTabsPaneContextMenu { .. }
             | OpenNewSessionMenu { .. }

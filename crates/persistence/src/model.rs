@@ -42,6 +42,7 @@ pub struct Window {
     pub agent_management_filters: Option<String>,
     pub left_panel_open: Option<bool>,
     pub vertical_tabs_panel_open: Option<bool>,
+    pub cmux_sidebar_open: Option<bool>,
 }
 
 #[derive(Identifiable, Insertable, Queryable)]
@@ -339,6 +340,7 @@ pub struct NewWindow {
     pub agent_management_filters: Option<String>,
     pub left_panel_open: Option<bool>,
     pub vertical_tabs_panel_open: Option<bool>,
+    pub cmux_sidebar_open: Option<bool>,
 }
 
 #[derive(Identifiable, Queryable, Associations)]
