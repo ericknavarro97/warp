@@ -82,6 +82,11 @@ pub enum TabContextMenuAnchor {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum TabGroupContextMenuAnchor {
+    Pointer(Vector2F),
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum VerticalTabsPaneContextMenuTarget {
     ClickedPane(PaneViewLocator),
     ActivePane(PaneViewLocator),
@@ -676,6 +681,58 @@ pub enum WorkspaceAction {
     /// Opens (or focuses) the in-app network log pane as a right-split of the
     /// active pane group. Gated on `ContextFlag::NetworkLogConsole`.
     OpenNetworkLogPane,
+    // -- cmux-style workspaces (Phase 3) ---------------------------------
+    // The next six variants drive the per-window vertical workspace
+    // switcher. They are dispatched from the new keybindings (Cmd+Shift+T,
+    // Cmd+Shift+1..9, Cmd+Shift+W, etc.) and from the sidebar UI added in
+    // Phase 4. Handlers in `Workspace::handle_action` are stubs in this
+    // commit; the Workspace registry refactor that actually mutates state
+    // lands together with the UI.
+    /// Activates the tab group at the given index inside the current
+    /// window's `WindowSnapshot::tab_groups`. No-op for legacy windows
+    /// (empty `tab_groups`).
+    ActivateTabGroup(usize),
+    /// Creates a new tab group at the end of the sidebar containing a
+    /// fresh default terminal tab.
+    NewTabGroup,
+    /// Closes the tab group at `index`, prompting if any tab inside has a
+    /// long-running process.
+    CloseTabGroup(usize),
+    /// Renames the tab group at `index`. The empty-string case resets the
+    /// name to the auto-generated one.
+    RenameTabGroup {
+        index: usize,
+        name: String,
+    },
+    /// Begins an inline rename on the tab group at `index` -- focuses
+    /// the shared `tab_group_rename_editor`, pre-fills it with the
+    /// current label, and selects the text. Submit (Enter / blur)
+    /// dispatches the actual `RenameTabGroup`. Esc cancels.
+    BeginRenameTabGroup(usize),
+    /// Sugar for `BeginRenameTabGroup(active_tab_group_index)`. Bound
+    /// to `Cmd+Shift+R` so users can rename the focused workspace
+    /// without leaving the keyboard.
+    BeginRenameActiveTabGroup,
+    /// Reorders the tab group at `index` one slot to the left in the
+    /// sidebar. No-op when the group is already first.
+    MoveTabGroupLeft(usize),
+    /// Reorders the tab group at `index` one slot to the right in the
+    /// sidebar. No-op when the group is already last.
+    MoveTabGroupRight(usize),
+    /// Toggles the floating right-click menu popover for the workspace
+    /// at `index`. The menu surfaces Rename / Color / Delete actions
+    /// and is dismissed by re-dispatching this action with the same
+    /// index (or by clicking outside / selecting any of its options).
+    /// Mirrors `ToggleTabRightClickMenu` for the cmux-style sidebar.
+    ToggleTabGroupRightClickMenu {
+        index: usize,
+        anchor: TabGroupContextMenuAnchor,
+    },
+    /// Sets the explicit color override for the workspace at `index`.
+    /// `None` clears the override and restores the inherited-from-tabs
+    /// color. The new value is mirrored onto `tab_groups.color` and
+    /// persisted on the next `save_app_state` cycle.
+    SetTabGroupColor(usize, Option<AnsiColorIdentifier>),
 }
 
 impl From<&WorkspaceAction> for LoginGatedFeature {
@@ -719,6 +776,13 @@ impl WorkspaceAction {
             ContinueConversationLocally { .. } => true,
             ActivateTab(_)
             | ActivateTabByNumber(_)
+            | ActivateTabGroup(_)
+            | NewTabGroup
+            | CloseTabGroup(_)
+            | RenameTabGroup { .. }
+            | SetTabGroupColor(..)
+            | MoveTabGroupLeft(_)
+            | MoveTabGroupRight(_)
             | ActivatePrevTab
             | ActivateNextTab
             | ActivateLastTab
@@ -801,6 +865,7 @@ impl WorkspaceAction {
             | ToggleErrorUnderlining
             | ToggleSyntaxHighlighting
             | OpenLaunchConfigSaveModal
+            | ToggleTabGroupRightClickMenu { .. }
             | ToggleTabRightClickMenu { .. }
             | ToggleVerticalTabsPaneContextMenu { .. }
             | OpenNewSessionMenu { .. }
@@ -947,7 +1012,9 @@ impl WorkspaceAction {
             | OpenSettingsFile
             | FixSettingsWithOz { .. }
             | OpenLocalToCloudHandoffPane { .. }
-            | OpenNetworkLogPane => false,
+            | OpenNetworkLogPane
+            | BeginRenameTabGroup(_)
+            | BeginRenameActiveTabGroup => false,
             #[cfg(debug_assertions)]
             ShowHoaOnboardingFlow => false,
             #[cfg(target_family = "wasm")]

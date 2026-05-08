@@ -40,6 +40,8 @@ pub enum OpenDialogSource {
         tab_index: usize,
         direction: TabMovement,
     },
+    /// Close every tab inside a cmux-style workspace.
+    CloseTabGroup { tab_group_index: usize },
 }
 
 pub struct CloseSessionConfirmationDialog {

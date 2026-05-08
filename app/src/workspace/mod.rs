@@ -559,6 +559,92 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(id!("Workspace"))
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_key_binding("cmdorctrl-9"),
+        // -- cmux-style workspaces (Phase 3) ---------------------------
+        // Cmd+Shift+T creates a new "Workspace" sidebar entry; Cmd+Shift+1
+        // through Cmd+Shift+8 jump to the n-th group. We deliberately stay
+        // off Cmd+1..9 to preserve the tab-switching shortcuts users
+        // already have in muscle memory. Indices are 0-based to mirror
+        // `WindowSnapshot::tab_groups`; see specs/cmux-workspaces/.
+        EditableBinding::new(
+            "workspace:new_tab_group",
+            "New workspace (cmux-style sidebar)",
+            WorkspaceAction::NewTabGroup,
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-T"),
+        EditableBinding::new(
+            "workspace:activate_first_tab_group",
+            "Switch to 1st workspace",
+            WorkspaceAction::ActivateTabGroup(0),
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-1"),
+        EditableBinding::new(
+            "workspace:activate_second_tab_group",
+            "Switch to 2nd workspace",
+            WorkspaceAction::ActivateTabGroup(1),
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-2"),
+        EditableBinding::new(
+            "workspace:activate_third_tab_group",
+            "Switch to 3rd workspace",
+            WorkspaceAction::ActivateTabGroup(2),
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-3"),
+        EditableBinding::new(
+            "workspace:activate_fourth_tab_group",
+            "Switch to 4th workspace",
+            WorkspaceAction::ActivateTabGroup(3),
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-4"),
+        EditableBinding::new(
+            "workspace:activate_fifth_tab_group",
+            "Switch to 5th workspace",
+            WorkspaceAction::ActivateTabGroup(4),
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-5"),
+        EditableBinding::new(
+            "workspace:activate_sixth_tab_group",
+            "Switch to 6th workspace",
+            WorkspaceAction::ActivateTabGroup(5),
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-6"),
+        EditableBinding::new(
+            "workspace:activate_seventh_tab_group",
+            "Switch to 7th workspace",
+            WorkspaceAction::ActivateTabGroup(6),
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-7"),
+        EditableBinding::new(
+            "workspace:activate_eighth_tab_group",
+            "Switch to 8th workspace",
+            WorkspaceAction::ActivateTabGroup(7),
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_key_binding("cmdorctrl-shift-8"),
+        EditableBinding::new(
+            "workspace:rename_active_tab_group",
+            "Rename the active workspace",
+            WorkspaceAction::BeginRenameActiveTabGroup,
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_group(bindings::BindingGroup::Settings.as_str())
+        .with_key_binding("cmdorctrl-shift-R"),
         EditableBinding::new(
             "workspace:activate_prev_tab",
             "Activate previous tab",
@@ -733,9 +819,14 @@ pub fn init(app: &mut AppContext) {
                 .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Toggle Vertical Tabs Panel"),
             WorkspaceAction::ToggleVerticalTabsPanel,
         )
-        .with_context_predicate(id!("Workspace") & id!(flags::USE_VERTICAL_TABS_FLAG))
+        .with_context_predicate(
+            id!("Workspace")
+                & (id!(flags::USE_VERTICAL_TABS_FLAG) | id!(flags::USE_CMUX_SIDEBAR_FLAG)),
+        )
         .with_group(bindings::BindingGroup::Navigation.as_str())
-        .with_enabled(|| FeatureFlag::VerticalTabs.is_enabled())
+        .with_enabled(|| {
+            FeatureFlag::VerticalTabs.is_enabled() || FeatureFlag::CmuxStyleWorkspaces.is_enabled()
+        })
         .with_key_binding(cmd_or_ctrl_shift("b")),
         EditableBinding::new(
             LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME,

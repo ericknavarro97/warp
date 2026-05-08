@@ -146,6 +146,12 @@ pub struct TabData {
     pub indicator_hover_state: MouseStateHandle,
     // Used by a later drag-tab branch to distinguish tabs that have moved into detached windows.
     pub detached: bool,
+    /// Index into the owning [`Workspace::tab_groups`]. `None` means the
+    /// tab belongs to the implicit default group (matches a NULL
+    /// `tabs.tab_group_id` row in SQLite). Mirrored onto and off of
+    /// [`crate::app_state::TabSnapshot::tab_group_index`] by the
+    /// snapshot round-trip.
+    pub tab_group_index: Option<usize>,
 }
 
 const TAB_COLOR_ICON_PATH: &str = "bundled/svg/ellipse.svg";
@@ -163,6 +169,7 @@ impl TabData {
             selected_color: SelectedTabColor::Unset,
             indicator_hover_state: Default::default(),
             detached: false,
+            tab_group_index: None,
         }
     }
 

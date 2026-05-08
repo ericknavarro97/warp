@@ -859,6 +859,14 @@ pub enum FeatureFlag {
     /// conversation into a fresh cloud agent run with the current workspace
     /// snapshot attached. Requires `OzHandoff` to also be enabled.
     HandoffLocalCloud,
+
+    /// Gates the cmux-style "Workspace" sidebar (per-window vertical
+    /// switcher with N tab groups, each owning its own tabs). The schema
+    /// (Phase 1), `WindowSnapshot` integration (Phase 2), and
+    /// `WorkspaceAction` variants (Phase 3) ship unconditionally; this
+    /// flag controls when the sidebar UI and its registry refactor
+    /// (Phase 4) become user-visible. See `specs/cmux-workspaces/`.
+    CmuxStyleWorkspaces,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -942,6 +950,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::CloudModeInputV2,
     FeatureFlag::HandoffLocalCloud,
     FeatureFlag::DragTabsToWindows,
+    FeatureFlag::CmuxStyleWorkspaces,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

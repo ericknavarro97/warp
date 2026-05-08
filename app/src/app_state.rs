@@ -54,9 +54,21 @@ pub struct WindowSnapshot {
     pub warp_drive_index_width: Option<f32>,
     pub left_panel_open: bool,
     pub vertical_tabs_panel_open: bool,
+    /// Open/close state of the cmux-style workspaces sidebar, persisted
+    /// independently of `vertical_tabs_panel_open` so the two paradigms
+    /// don't share storage.
+    pub cmux_sidebar_open: bool,
     pub left_panel_width: Option<f32>,
     pub right_panel_width: Option<f32>,
     pub agent_management_filters: Option<PersistedAgentManagementFilters>,
+    /// cmux-style "Workspace" sidebar entries owned by this window. An empty
+    /// `Vec` is the legacy / pre-feature shape and is interpreted as a single
+    /// implicit default group containing every tab. See
+    /// `specs/cmux-workspaces/`.
+    pub tab_groups: Vec<TabGroupSnapshot>,
+    /// Index into `tab_groups`. When `tab_groups` is empty this is always 0
+    /// and refers to the implicit default group.
+    pub active_tab_group_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +79,20 @@ pub struct TabSnapshot {
     pub selected_color: SelectedTabColor,
     pub left_panel: Option<LeftPanelSnapshot>,
     pub right_panel: Option<RightPanelSnapshot>,
+    /// Index into the owning [`WindowSnapshot::tab_groups`]. `None` means the
+    /// tab belongs to the implicit default group (matches a NULL
+    /// `tabs.tab_group_id` row in SQLite).
+    pub tab_group_index: Option<usize>,
+}
+
+/// cmux-style "Workspace" sidebar entry. See `specs/cmux-workspaces/` for the
+/// rationale behind the `TabGroup` naming.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabGroupSnapshot {
+    pub name: String,
+    pub color: Option<String>,
+    pub position: i32,
+    pub is_active: bool,
 }
 
 impl TabSnapshot {

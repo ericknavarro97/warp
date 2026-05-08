@@ -61,8 +61,14 @@ impl HeaderToolbarItemKind {
     pub fn is_supported(&self, app: &AppContext) -> bool {
         match self {
             Self::TabsPanel => {
-                FeatureFlag::VerticalTabs.is_enabled()
-                    && *TabSettings::as_ref(app).use_vertical_tabs
+                // Accept either the legacy vertical-tabs setting OR the
+                // cmux-style workspaces feature flag. With cmux on, this
+                // toolbar button toggles the workspaces sidebar (which
+                // takes over the vertical-tabs slot), so users no longer
+                // need to opt into vertical tabs to see the sidebar.
+                (FeatureFlag::VerticalTabs.is_enabled()
+                    && *TabSettings::as_ref(app).use_vertical_tabs)
+                    || FeatureFlag::CmuxStyleWorkspaces.is_enabled()
             }
             Self::ToolsPanel => true,
             Self::AgentManagement => {
